@@ -1,2 +1,8 @@
 .DS_Store
 __pycache__/
+.agents/
+AGENTS.md
+.pytest_cache/
+.env
+venv/
+.vscode/
