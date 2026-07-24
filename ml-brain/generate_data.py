@@ -1,0 +1,192 @@
+"""Generate grocery training data for the FreshTracker classifier."""
+
+import csv
+from pathlib import Path
+
+
+CATEGORIES = {"Dairy", "Produce", "Meat", "Pantry", "Bakery", "Drinks"}
+
+GROCERY_ITEMS = [
+    ("milk", "Dairy"),
+    ("whole milk", "Dairy"),
+    ("skim milk", "Dairy"),
+    ("cheddar cheese", "Dairy"),
+    ("mozzarella cheese", "Dairy"),
+    ("parmesan cheese", "Dairy"),
+    ("cream cheese", "Dairy"),
+    ("cottage cheese", "Dairy"),
+    ("greek yogurt", "Dairy"),
+    ("plain yogurt", "Dairy"),
+    ("sour cream", "Dairy"),
+    ("heavy cream", "Dairy"),
+    ("half and half", "Dairy"),
+    ("butter", "Dairy"),
+    ("salted butter", "Dairy"),
+    ("unsalted butter", "Dairy"),
+    ("eggs", "Dairy"),
+    ("egg whites", "Dairy"),
+    ("feta cheese", "Dairy"),
+    ("swiss cheese", "Dairy"),
+    ("ricotta cheese", "Dairy"),
+    ("provolone cheese", "Dairy"),
+    ("goat cheese", "Dairy"),
+    ("string cheese", "Dairy"),
+    ("whipped cream", "Dairy"),
+    ("apples", "Produce"),
+    ("bananas", "Produce"),
+    ("oranges", "Produce"),
+    ("lemons", "Produce"),
+    ("limes", "Produce"),
+    ("strawberries", "Produce"),
+    ("blueberries", "Produce"),
+    ("grapes", "Produce"),
+    ("pineapple", "Produce"),
+    ("watermelon", "Produce"),
+    ("avocado", "Produce"),
+    ("tomatoes", "Produce"),
+    ("cherry tomatoes", "Produce"),
+    ("lettuce", "Produce"),
+    ("spinach", "Produce"),
+    ("kale", "Produce"),
+    ("broccoli", "Produce"),
+    ("cauliflower", "Produce"),
+    ("carrots", "Produce"),
+    ("celery", "Produce"),
+    ("cucumbers", "Produce"),
+    ("bell peppers", "Produce"),
+    ("onions", "Produce"),
+    ("red onions", "Produce"),
+    ("garlic", "Produce"),
+    ("potatoes", "Produce"),
+    ("sweet potatoes", "Produce"),
+    ("mushrooms", "Produce"),
+    ("zucchini", "Produce"),
+    ("corn on the cob", "Produce"),
+    ("chicken breast", "Meat"),
+    ("chicken thighs", "Meat"),
+    ("whole chicken", "Meat"),
+    ("ground chicken", "Meat"),
+    ("turkey breast", "Meat"),
+    ("ground turkey", "Meat"),
+    ("beef steak", "Meat"),
+    ("ground beef", "Meat"),
+    ("beef roast", "Meat"),
+    ("pork chops", "Meat"),
+    ("pork tenderloin", "Meat"),
+    ("bacon", "Meat"),
+    ("ham", "Meat"),
+    ("sausage links", "Meat"),
+    ("italian sausage", "Meat"),
+    ("salmon fillets", "Meat"),
+    ("tilapia fillets", "Meat"),
+    ("shrimp", "Meat"),
+    ("tuna steaks", "Meat"),
+    ("cod fillets", "Meat"),
+    ("deli turkey", "Meat"),
+    ("deli ham", "Meat"),
+    ("hot dogs", "Meat"),
+    ("lamb chops", "Meat"),
+    ("meatballs", "Meat"),
+    ("white rice", "Pantry"),
+    ("brown rice", "Pantry"),
+    ("pasta", "Pantry"),
+    ("spaghetti", "Pantry"),
+    ("macaroni", "Pantry"),
+    ("flour", "Pantry"),
+    ("all purpose flour", "Pantry"),
+    ("sugar", "Pantry"),
+    ("brown sugar", "Pantry"),
+    ("salt", "Pantry"),
+    ("black pepper", "Pantry"),
+    ("olive oil", "Pantry"),
+    ("vegetable oil", "Pantry"),
+    ("canned tomatoes", "Pantry"),
+    ("tomato paste", "Pantry"),
+    ("canned beans", "Pantry"),
+    ("black beans", "Pantry"),
+    ("kidney beans", "Pantry"),
+    ("chickpeas", "Pantry"),
+    ("peanut butter", "Pantry"),
+    ("jam", "Pantry"),
+    ("honey", "Pantry"),
+    ("oatmeal", "Pantry"),
+    ("cereal", "Pantry"),
+    ("granola", "Pantry"),
+    ("crackers", "Pantry"),
+    ("tortilla chips", "Pantry"),
+    ("salsa", "Pantry"),
+    ("soy sauce", "Pantry"),
+    ("vinegar", "Pantry"),
+    ("sandwich bread", "Bakery"),
+    ("whole wheat bread", "Bakery"),
+    ("sourdough bread", "Bakery"),
+    ("bagels", "Bakery"),
+    ("english muffins", "Bakery"),
+    ("hamburger buns", "Bakery"),
+    ("hot dog buns", "Bakery"),
+    ("dinner rolls", "Bakery"),
+    ("croissants", "Bakery"),
+    ("muffins", "Bakery"),
+    ("blueberry muffins", "Bakery"),
+    ("banana bread", "Bakery"),
+    ("pita bread", "Bakery"),
+    ("naan bread", "Bakery"),
+    ("tortillas", "Bakery"),
+    ("pizza dough", "Bakery"),
+    ("pie crust", "Bakery"),
+    ("cookies", "Bakery"),
+    ("brownies", "Bakery"),
+    ("cake slices", "Bakery"),
+    ("water", "Drinks"),
+    ("sparkling water", "Drinks"),
+    ("orange juice", "Drinks"),
+    ("apple juice", "Drinks"),
+    ("cranberry juice", "Drinks"),
+    ("grape juice", "Drinks"),
+    ("lemonade", "Drinks"),
+    ("iced tea", "Drinks"),
+    ("green tea", "Drinks"),
+    ("coffee", "Drinks"),
+    ("cold brew coffee", "Drinks"),
+    ("soda", "Drinks"),
+    ("cola", "Drinks"),
+    ("ginger ale", "Drinks"),
+    ("sports drink", "Drinks"),
+    ("energy drink", "Drinks"),
+    ("almond milk", "Drinks"),
+    ("oat milk", "Drinks"),
+    ("coconut water", "Drinks"),
+    ("kombucha", "Drinks"),
+]
+
+
+def validate_items(items):
+    assert len(items) == 150, "Expected exactly 150 grocery items."
+
+    invalid_categories = {
+        category for _, category in items if category not in CATEGORIES
+    }
+    assert not invalid_categories, f"Invalid categories: {invalid_categories}"
+
+    ingredient_names = [ingredient_name for ingredient_name, _ in items]
+    assert len(ingredient_names) == len(set(ingredient_names)), (
+        "Ingredient names must be unique."
+    )
+
+
+def write_grocery_csv(items, output_path):
+    with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["ingredient_name", "category"])
+        writer.writerows(items)
+
+
+def main():
+    validate_items(GROCERY_ITEMS)
+    output_path = Path(__file__).with_name("grocery_data.csv")
+    write_grocery_csv(GROCERY_ITEMS, output_path)
+    print(f"Created {output_path} with {len(GROCERY_ITEMS)} rows.")
+
+
+if __name__ == "__main__":
+    main()

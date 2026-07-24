@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from app import create_app, db
@@ -55,13 +57,162 @@ def test_create_item_returns_created_item(client):
     }
 
 
-def test_create_item_rejects_missing_required_fields(client):
-    response = client.post("/items", json={"name": "Milk"})
+def test_create_item_predicts_missing_category(monkeypatch, client):
+    monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+
+    response = client.post(
+        "/items",
+        json={"name": "Spinach"},
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["item"] == {
+        "id": 1,
+        "name": "Spinach",
+        "category": "Produce",
+        "quantity": 1.0,
+        "unit": "item",
+        "expiry_date": date.today().isoformat(),
+        "status": "active",
+    }
+
+
+def test_create_item_stacks_matching_items(monkeypatch, client):
+    monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+
+    first_response = client.post(
+        "/items",
+        json={
+            "name": "Spinach",
+            "quantity": 2,
+            "unit": "bag",
+            "expiry_date": "2026-07-02",
+        },
+    )
+    assert first_response.status_code == 201
+
+    second_response = client.post(
+        "/items",
+        json={
+            "name": "Spinach",
+            "quantity": 3,
+            "unit": "bag",
+            "expiry_date": "2026-07-02",
+        },
+    )
+
+    assert second_response.status_code == 201
+    assert second_response.get_json()["item"] == {
+        "id": 1,
+        "name": "Spinach",
+        "category": "Produce",
+        "quantity": 5.0,
+        "unit": "bag",
+        "expiry_date": "2026-07-02",
+        "status": "active",
+    }
+
+    response = client.get("/items")
+
+    assert response.status_code == 200
+    assert response.get_json()["items"] == [
+        {
+            "id": 1,
+            "name": "Spinach",
+            "category": "Produce",
+            "quantity": 5.0,
+            "unit": "bag",
+            "expiry_date": "2026-07-02",
+            "status": "active",
+        }
+    ]
+
+
+def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
+    monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+
+    first_response = client.post(
+        "/items",
+        json={
+            "name": "Tomatoes",
+            "quantity": 8,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+        },
+    )
+    assert first_response.status_code == 201
+
+    second_response = client.post(
+        "/items",
+        json={
+            "name": "Tomatoes",
+            "quantity": 5,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+        },
+    )
+
+    assert second_response.status_code == 201
+    assert second_response.get_json()["item"] == {
+        "id": 1,
+        "name": "Tomatoes",
+        "category": "Produce",
+        "quantity": 10.0,
+        "unit": "box",
+        "expiry_date": "2026-07-02",
+        "status": "active",
+    }
+    assert second_response.get_json()["stacked_items"] == [
+        {
+            "id": 1,
+            "name": "Tomatoes",
+            "category": "Produce",
+            "quantity": 10.0,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+            "status": "active",
+        },
+        {
+            "id": 2,
+            "name": "Tomatoes",
+            "category": "Produce",
+            "quantity": 3.0,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+            "status": "active",
+        },
+    ]
+
+    response = client.get("/items")
+
+    assert response.status_code == 200
+    assert response.get_json()["items"] == [
+        {
+            "id": 1,
+            "name": "Tomatoes",
+            "category": "Produce",
+            "quantity": 10.0,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+            "status": "active",
+        },
+        {
+            "id": 2,
+            "name": "Tomatoes",
+            "category": "Produce",
+            "quantity": 3.0,
+            "unit": "box",
+            "expiry_date": "2026-07-02",
+            "status": "active",
+        },
+    ]
+
+
+def test_create_item_rejects_missing_name(client):
+    response = client.post("/items", json={"quantity": 1})
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": "missing required field(s): quantity, unit, expiry_date"
-    }
+    assert response.get_json() == {"error": "missing required field(s): name"}
 
 
 def test_create_item_rejects_invalid_expiry_date(client):
@@ -79,7 +230,9 @@ def test_create_item_rejects_invalid_expiry_date(client):
     assert response.get_json() == {"error": "expiry_date must be an ISO date string"}
 
 
-def test_list_items_only_returns_active_items(client):
+def test_list_items_only_returns_active_items(monkeypatch, client):
+    monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+
     client.post(
         "/items",
         json={
@@ -107,7 +260,7 @@ def test_list_items_only_returns_active_items(client):
         {
             "id": 1,
             "name": "Spinach",
-            "category": None,
+            "category": "Produce",
             "quantity": 1.0,
             "unit": "bag",
             "expiry_date": "2026-07-02",

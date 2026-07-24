@@ -1,0 +1,42 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Geist:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 39 41% 93%;
+    --foreground: 37 26% 12%;
+    --card: 42 52% 98%;
+    --card-foreground: 37 26% 12%;
+    --primary: 145 30% 20%;
+    --primary-foreground: 43 52% 96%;
+    --secondary: 32 37% 86%;
+    --secondary-foreground: 37 26% 12%;
+    --muted: 35 29% 88%;
+    --muted-foreground: 34 14% 39%;
+    --accent: 145 30% 20%;
+    --accent-foreground: 43 52% 96%;
+    --destructive: 12 50% 43%;
+    --destructive-foreground: 43 52% 96%;
+    --border: 33 30% 80%;
+    --input: 33 30% 80%;
+    --ring: 145 30% 20%;
+    --radius: 0.55rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply min-h-screen bg-background font-sans text-foreground antialiased;
+    font-synthesis: none;
+  }
+
+  button,
+  input {
+    letter-spacing: 0;
+  }
+}

@@ -23,6 +23,8 @@ services:
       DATABASE_URL: postgresql://freshtracker:freshtracker@db:5432/freshtracker
     ports:
       - "5000:5000"
+    volumes:
+      - ./ml-brain:/app/ml-brain:ro
     depends_on:
       db:
         condition: service_healthy
