@@ -1,8 +1,8 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
-from app import create_app, db
+from app import Session, create_app, db, now_utc
 
 
 @pytest.fixture()
@@ -26,7 +26,7 @@ def client(app):
     return app.test_client()
 
 
-def register_user(client, email="tester@example.com", password="password123"):
+def register_user(client, email="tester@example.com", password="Password-1234"):
     response = client.post(
         "/auth/register",
         json={"email": email, "password": password},
@@ -46,12 +46,23 @@ def test_health_returns_ok_status(client):
 
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
+    assert response.headers["Content-Security-Policy"] == (
+        "default-src 'none'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none';"
+    )
+
+
+def test_unknown_api_route_returns_json_error(client):
+    response = client.get("/does-not-exist")
+
+    assert response.status_code == 404
+    assert response.is_json
 
 
 def test_register_login_and_logout_flow(client):
     response = client.post(
         "/auth/register",
-        json={"email": "tester@example.com", "password": "password123"},
+        json={"email": "tester@example.com", "password": "Password-1234"},
     )
 
     assert response.status_code == 201
@@ -66,7 +77,7 @@ def test_register_login_and_logout_flow(client):
 
     response = client.post(
         "/auth/login",
-        json={"email": "tester@example.com", "password": "password123"},
+        json={"email": "tester@example.com", "password": "Password-1234"},
     )
 
     assert response.status_code == 200
@@ -311,7 +322,11 @@ def test_list_items_only_returns_active_items(monkeypatch, client):
             "expiry_date": "2026-07-01",
         },
     ).get_json()["item"]
-    client.patch(f"/items/{created['id']}", json={"status": "used"})
+    client.patch(
+        f"/items/{created['id']}",
+        headers=csrf_headers(client),
+        json={"status": "used"},
+    )
 
     response = client.get("/items")
 
@@ -366,3 +381,111 @@ def test_patch_item_returns_not_found(client):
 
     assert response.status_code == 404
     assert response.get_json() == {"error": "item not found"}
+
+
+def test_authenticated_writes_require_a_matching_csrf_token(client):
+    register_user(client)
+
+    response = client.post("/items", json={"name": "Milk"})
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "missing CSRF token"}
+
+
+def test_logout_requires_csrf_protection(client):
+    register_user(client)
+
+    response = client.post("/auth/logout", json={})
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "missing CSRF token"}
+
+
+def test_write_rejects_an_untrusted_origin(client):
+    register_user(client)
+    headers = {**csrf_headers(client), "Origin": "https://malicious.example"}
+
+    response = client.post("/items", headers=headers, json={"name": "Milk"})
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "invalid origin"}
+
+
+def test_inventory_is_private_to_its_owner(app):
+    first_client = app.test_client()
+    second_client = app.test_client()
+    register_user(first_client, email="first@example.com")
+
+    item = first_client.post(
+        "/items",
+        headers=csrf_headers(first_client),
+        json={"name": "Milk", "expiry_date": "2026-07-01"},
+    ).get_json()["item"]
+
+    register_user(second_client, email="second@example.com")
+
+    assert second_client.get("/items").get_json() == {"items": []}
+    response = second_client.patch(
+        f"/items/{item['id']}",
+        headers=csrf_headers(second_client),
+        json={"status": "wasted"},
+    )
+
+    assert response.status_code == 404
+    assert first_client.get("/items").get_json()["items"][0]["status"] == "active"
+
+
+def test_session_idle_expiry_blocks_inventory_access(app, client):
+    register_user(client)
+
+    with app.app_context():
+        session = Session.query.one()
+        session.last_seen_at = now_utc() - timedelta(minutes=31)
+        db.session.commit()
+
+    response = client.get("/auth/me")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "authenticated": False,
+        "session_expired": True,
+        "user": None,
+    }
+
+    response = client.get("/items")
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "authentication required"}
+
+
+def test_new_login_revokes_an_existing_session(app):
+    original_client = app.test_client()
+    new_client = app.test_client()
+    register_user(original_client)
+
+    response = new_client.post(
+        "/auth/login",
+        json={"email": "tester@example.com", "password": "Password-1234"},
+    )
+
+    assert response.status_code == 200
+    assert original_client.get("/items").status_code == 401
+    assert new_client.get("/items").status_code == 200
+
+
+def test_create_item_rejects_zero_or_non_finite_quantity(client):
+    register_user(client)
+
+    zero_response = client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk", "quantity": 0},
+    )
+    nan_response = client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk", "quantity": "NaN"},
+    )
+
+    assert zero_response.get_json() == {"error": "quantity must be greater than 0"}
+    assert nan_response.get_json() == {"error": "quantity must be greater than 0"}

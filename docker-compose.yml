@@ -19,14 +19,19 @@ services:
     build:
       context: ./flask-api
     environment:
-      FLASK_ENV: development
       DATABASE_URL: postgresql://freshtracker:freshtracker@db:5432/freshtracker
       SESSION_COOKIE_SECURE: "false"
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
     ports:
       - "5000:5000"
     volumes:
       - ./ml-brain:/app/ml-brain:ro
-    command: ["python", "app.py"]
+    command:
+      [
+        "sh",
+        "-c",
+        "flask --app app:app db upgrade && exec gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --access-logfile - --error-logfile - app:app",
+      ]
     restart: unless-stopped
     healthcheck:
       test:
@@ -37,6 +42,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
     depends_on:
       db:
         condition: service_healthy
@@ -44,13 +50,11 @@ services:
   freshtracker-web:
     build:
       context: ./freshtracker-web
-    environment:
-      VITE_API_PROXY_TARGET: http://flask-api:5000
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       flask-api:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   postgres_data:

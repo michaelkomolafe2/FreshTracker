@@ -25,10 +25,19 @@ const UNIT_OPTIONS = [
   "pound",
 ]
 
-const initialValues = {
-  name: "",
-  quantity: "1",
-  unit: "item",
+function localDateInputValue() {
+  const today = new Date()
+  const timezoneOffset = today.getTimezoneOffset() * 60_000
+  return new Date(today.getTime() - timezoneOffset).toISOString().slice(0, 10)
+}
+
+function initialValues() {
+  return {
+    name: "",
+    quantity: "1",
+    unit: "item",
+    expiry_date: localDateInputValue(),
+  }
 }
 
 export function ItemForm({ onAddItem, isAdding }) {
@@ -54,8 +63,8 @@ export function ItemForm({ onAddItem, isAdding }) {
       return
     }
 
-    if (!Number.isFinite(quantity) || quantity < 0) {
-      setLocalError("Quantity needs to be zero or more.")
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      setLocalError("Quantity needs to be greater than zero.")
       return
     }
 
@@ -65,7 +74,7 @@ export function ItemForm({ onAddItem, isAdding }) {
         quantity,
         unit: formValues.unit,
       })
-      setFormValues(initialValues)
+      setFormValues(initialValues())
     } catch {
       // The parent renders the API error.
     }
@@ -91,6 +100,19 @@ export function ItemForm({ onAddItem, isAdding }) {
               onChange={(event) => updateField("name", event.target.value)}
               placeholder="e.g. cherry tomatoes"
               autoComplete="off"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-semibold" htmlFor="expiry-date">
+              Use-by date
+            </label>
+            <Input
+              id="expiry-date"
+              type="date"
+              required
+              value={formValues.expiry_date}
+              onChange={(event) => updateField("expiry_date", event.target.value)}
             />
           </div>
 

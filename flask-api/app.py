@@ -1,14 +1,19 @@
 import os
 import hashlib
-from datetime import datetime, timedelta, timezone
-from datetime import date
+import hmac
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from secrets import token_urlsafe
 from pathlib import Path
 
 import joblib
 from flask import Flask, current_app, g, jsonify, request
+from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -24,8 +29,9 @@ if not MODEL_PATH.exists():
 category_model = joblib.load(MODEL_PATH)
 
 db = SQLAlchemy()
+migrate = Migrate()
 
-MAX_STACK_QUANTITY = 10.0
+MAX_STACK_QUANTITY = Decimal("10")
 SESSION_COOKIE_NAME = "freshtracker_session"
 CSRF_COOKIE_NAME = "freshtracker_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -45,12 +51,30 @@ class InventoryItem(db.Model):
     __tablename__ = "inventory_items"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    user = db.relationship("User", back_populates="inventory_items")
     name = db.Column(db.String(120), nullable=False)
+    stack_key = db.Column(db.String(64), nullable=False)
     category = db.Column(db.String(80), nullable=True)
     quantity = db.Column(db.Float, nullable=False)
     unit = db.Column(db.String(40), nullable=False)
     expiry_date = db.Column(db.Date, nullable=False)
     status = db.Column(db.String(20), nullable=False, default="active")
+
+    __table_args__ = (
+        db.Index(
+            "ix_inventory_items_user_stack_status",
+            "user_id",
+            "stack_key",
+            "status",
+        ),
+        db.Index(
+            "ix_inventory_items_user_status_expiry",
+            "user_id",
+            "status",
+            "expiry_date",
+        ),
+    )
 
     def to_dict(self):
         return {
@@ -70,6 +94,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(254), nullable=False, unique=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
+    inventory_items = db.relationship("InventoryItem", back_populates="user")
 
     def to_dict(self):
         return {
@@ -90,53 +115,43 @@ class Session(db.Model):
     last_seen_at = db.Column(db.DateTime(timezone=True), nullable=False)
     expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
     revoked_at = db.Column(db.DateTime(timezone=True), nullable=True)
-    rotated_from_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=True)
-    rotated_from = db.relationship("Session", remote_side=[id], uselist=False)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "user_id": self.user_id,
-            "expires_at": self.expires_at.isoformat(),
-        }
 
 
-def normalized_stack_key(name, unit, expiry_date):
+def build_stack_key(name, unit, expiry_date):
+    """Create a stable value identifier for items that can share a stack."""
+    parts = (name.strip().casefold(), unit.strip().casefold(), expiry_date.isoformat())
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+def matching_active_stacks(user_id, stack_key):
+    # Row locks serialize concurrent additions to the same stack.
     return (
-        name.strip().casefold(),
-        unit.strip().casefold(),
-        expiry_date.isoformat(),
+        InventoryItem.query.filter_by(
+            user_id=user_id,
+            stack_key=stack_key,
+            status="active",
+        )
+        .order_by(InventoryItem.id.asc())
+        .with_for_update()
+        .all()
     )
 
 
-def matching_active_stacks(name, unit, expiry_date):
-    target_key = normalized_stack_key(name, unit, expiry_date)
-    return [
-        item
-        for item in InventoryItem.query.filter_by(
-            status="active",
-            expiry_date=expiry_date,
-        )
-        .order_by(InventoryItem.id.asc())
-        .all()
-        if normalized_stack_key(item.name, item.unit, item.expiry_date) == target_key
-    ]
-
-
-def apply_item_stack(existing_stacks, name, category, unit, expiry_date, quantity):
-    remaining = float(quantity)
+def apply_item_stack(user_id, existing_stacks, name, category, unit, expiry_date, quantity):
+    """Fill older matching stacks first, then create only necessary overflow stacks."""
+    remaining = quantity
     affected_items = []
 
     for stack in existing_stacks:
         if remaining <= 0:
             break
 
-        available_space = max(MAX_STACK_QUANTITY - stack.quantity, 0)
+        available_space = max(MAX_STACK_QUANTITY - Decimal(str(stack.quantity)), Decimal("0"))
         if available_space <= 0:
             continue
 
         added_quantity = min(available_space, remaining)
-        stack.quantity += added_quantity
+        stack.quantity = float(Decimal(str(stack.quantity)) + added_quantity)
         if stack.category is None and category is not None:
             stack.category = category
 
@@ -146,9 +161,11 @@ def apply_item_stack(existing_stacks, name, category, unit, expiry_date, quantit
     while remaining > 0:
         stack_quantity = min(MAX_STACK_QUANTITY, remaining)
         item = InventoryItem(
+            user_id=user_id,
             name=name,
+            stack_key=build_stack_key(name, unit, expiry_date),
             category=category,
-            quantity=stack_quantity,
+            quantity=float(stack_quantity),
             unit=unit,
             expiry_date=expiry_date,
         )
@@ -166,48 +183,61 @@ def create_app(config=None):
         "postgresql://freshtracker:freshtracker@db:5432/freshtracker",
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    app.config["ALLOWED_ORIGINS"] = ALLOWED_ORIGINS
 
     if config:
         app.config.update(config)
 
     db.init_app(app)
+    migrate.init_app(app, db)
+
+    @app.errorhandler(HTTPException)
+    def json_http_error(error):
+        return jsonify({"error": error.description}), error.code
+
+    @app.errorhandler(Exception)
+    def json_unexpected_error(error):
+        db.session.rollback()
+        if current_app.testing:
+            raise error
+        current_app.logger.exception("Unhandled API error")
+        return jsonify({"error": "internal server error"}), 500
 
     @app.after_request
     def add_security_headers(response):
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "base-uri 'self'; "
-            "connect-src 'self' http://localhost:5000 http://127.0.0.1:5000; "
-            "img-src 'self' data:; "
-            "font-src 'self' https://fonts.gstatic.com; "
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-            "script-src 'self'; "
-            "form-action 'self'; "
+            "default-src 'none'; "
+            "base-uri 'none'; "
+            "form-action 'none'; "
             "frame-ancestors 'none';"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         return response
 
     @app.before_request
     def load_active_session():
-        if request.method == "OPTIONS":
-            return None
-        if request.path in {
-            "/health",
-            "/auth/register",
-            "/auth/login",
-            "/auth/me",
-        }:
-            return None
         session = current_session()
         g.active_session = session
         g.current_user = session.user if session is not None else None
+
+        if request.method == "OPTIONS":
+            return None
+
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
+            origin_error = validate_trusted_origin()
+            if origin_error:
+                return jsonify({"error": origin_error}), 403
+
+        if request.path in {"/health", "/auth/register", "/auth/login", "/auth/me"}:
+            return None
+
         if request.path.startswith("/items") and session is None:
             return jsonify({"error": "authentication required"}), 401
-        if request.method in {"POST", "PATCH", "PUT", "DELETE"} and request.path.startswith("/auth/") is False:
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
             if session is None:
                 return jsonify({"error": "authentication required"}), 401
             csrf_error = validate_csrf(session)
@@ -217,21 +247,36 @@ def create_app(config=None):
 
     @app.after_request
     def refresh_session(response):
-        session = current_session()
-        if session is not None and session.revoked_at is None:
+        session = getattr(g, "active_session", None)
+        if response.status_code < 400 and session is not None and session.revoked_at is None:
             session.last_seen_at = now_utc()
             db.session.commit()
         return response
 
     @app.get("/health")
     def health():
+        try:
+            db.session.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            db.session.rollback()
+            return jsonify({"status": "unavailable"}), 503
         return jsonify({"status": "ok"})
 
     @app.get("/auth/me")
     def auth_me():
         user = get_current_user()
         if user is None:
-            return jsonify({"authenticated": False, "user": None})
+            response = jsonify(
+                {
+                    "authenticated": False,
+                    "session_expired": bool(getattr(g, "session_expired", False)),
+                    "user": None,
+                }
+            )
+            if getattr(g, "session_expired", False):
+                response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+                response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+            return response
         return jsonify({"authenticated": True, "user": user.to_dict()})
 
     @app.post("/auth/register")
@@ -247,11 +292,15 @@ def create_app(config=None):
         if User.query.filter_by(email=email).first() is not None:
             return jsonify({"error": "That email is already registered."}), 409
 
-        user = User(email=email, password_hash=generate_password_hash(password))
-        db.session.add(user)
-        db.session.flush()
-        session, token, csrf_token = issue_session(user)
-        db.session.commit()
+        try:
+            user = User(email=email, password_hash=generate_password_hash(password))
+            db.session.add(user)
+            db.session.flush()
+            _, token, csrf_token = issue_session(user)
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({"error": "That email is already registered."}), 409
         response = jsonify({"user": user.to_dict()})
         set_session_cookie(response, token, csrf_token)
         return response, 201
@@ -278,7 +327,7 @@ def create_app(config=None):
 
     @app.post("/auth/logout")
     def auth_logout():
-        session = current_session()
+        session = getattr(g, "active_session", None)
         if session is not None:
             session.revoked_at = now_utc()
             db.session.commit()
@@ -303,30 +352,23 @@ def create_app(config=None):
         unit = clean_optional_string(data.get("unit")) or "item"
         expiry_date = parse_expiry_date(data.get("expiry_date"))
         quantity = parse_quantity(data.get("quantity"))
+        stack_key = build_stack_key(item_name, unit, expiry_date)
 
-        existing_stacks = matching_active_stacks(item_name, unit, expiry_date)
-        if existing_stacks or quantity > 0:
-            affected_items = apply_item_stack(
-                existing_stacks,
-                item_name,
-                category,
-                unit,
-                expiry_date,
-                quantity,
-            )
-            db.session.commit()
-            primary_item = affected_items[0] if affected_items else existing_stacks[0]
-        else:
-            primary_item = InventoryItem(
-                name=item_name,
-                category=category,
-                quantity=quantity,
-                unit=unit,
-                expiry_date=expiry_date,
-            )
-            db.session.add(primary_item)
-            db.session.commit()
-            affected_items = [primary_item]
+        # Lock the owning user as well as matching stacks. The user lock also
+        # covers the empty-stack case, where there is no stack row to lock yet.
+        user = User.query.filter_by(id=get_current_user().id).with_for_update().one()
+        existing_stacks = matching_active_stacks(user.id, stack_key)
+        affected_items = apply_item_stack(
+            user.id,
+            existing_stacks,
+            item_name,
+            category,
+            unit,
+            expiry_date,
+            quantity,
+        )
+        db.session.commit()
+        primary_item = affected_items[0]
 
         payload = {"item": primary_item.to_dict()}
         if len(affected_items) > 1:
@@ -338,7 +380,7 @@ def create_app(config=None):
     @require_authentication
     def list_items():
         items = (
-            InventoryItem.query.filter_by(status="active")
+            InventoryItem.query.filter_by(user_id=get_current_user().id, status="active")
             .order_by(InventoryItem.expiry_date.asc(), InventoryItem.id.asc())
             .all()
         )
@@ -354,7 +396,10 @@ def create_app(config=None):
         if status not in {"used", "wasted"}:
             return jsonify({"error": "status must be either 'used' or 'wasted'"}), 400
 
-        item = db.session.get(InventoryItem, item_id)
+        item = InventoryItem.query.filter_by(
+            id=item_id,
+            user_id=get_current_user().id,
+        ).first()
         if item is None:
             return jsonify({"error": "item not found"}), 404
 
@@ -374,40 +419,57 @@ def validate_auth_payload(data):
     if "email" not in data or "password" not in data:
         return "missing required field(s): email, password"
 
-    if not isinstance(data["email"], str) or not data["email"].strip():
-        return "email must be a non-empty string"
+    if (
+        not isinstance(data["email"], str)
+        or not data["email"].strip()
+        or "@" not in data["email"]
+        or len(data["email"].strip()) > 254
+    ):
+        return "email must be a valid email address"
 
-    if not isinstance(data["password"], str) or len(data["password"]) < 8:
-        return "password must be at least 8 characters"
+    if not isinstance(data["password"], str) or not 12 <= len(data["password"]) <= 128:
+        return "password must be between 12 and 128 characters"
 
     return None
 
 
 def current_session():
+    if hasattr(g, "active_session"):
+        return g.active_session
+
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
+        g.active_session = None
         return None
 
     token_hash = hash_session_token(token)
     session = Session.query.filter_by(token_hash=token_hash).first()
     if session is None or session.revoked_at is not None:
+        g.active_session = None
         return None
 
     now = now_utc()
-    if session.expires_at <= now:
+    if ensure_utc(session.expires_at) <= now:
         session.revoked_at = now
         db.session.commit()
+        g.active_session = None
+        g.session_expired = True
         return None
 
-    if now - session.last_seen_at > timedelta(minutes=SESSION_IDLE_MINUTES):
+    if now - ensure_utc(session.last_seen_at) > timedelta(minutes=SESSION_IDLE_MINUTES):
         session.revoked_at = now
         db.session.commit()
+        g.active_session = None
+        g.session_expired = True
         return None
 
+    g.active_session = session
     return session
 
 
 def get_current_user():
+    if hasattr(g, "current_user"):
+        return g.current_user
     session = current_session()
     return session.user if session is not None else None
 
@@ -447,30 +509,41 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
-def validate_csrf(session):
-    origin = request.headers.get("Origin")
-    if origin and origin not in ALLOWED_ORIGINS:
-        return "invalid origin"
-    if (
-        not origin
-        and not current_app.testing
-        and request.host
-        and request.host_url.rstrip("/") not in ALLOWED_ORIGINS
-    ):
-        return "invalid origin"
+def ensure_utc(value):
+    """Normalize database timestamps from drivers that omit timezone metadata."""
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
+
+def validate_csrf(session):
     submitted = request.headers.get(CSRF_HEADER_NAME)
     if not submitted:
         return "missing CSRF token"
 
-    if hash_session_token(submitted) != session.csrf_hash:
+    if not hmac.compare_digest(hash_session_token(submitted), session.csrf_hash):
         return "invalid CSRF token"
 
     csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
-    if not csrf_cookie or csrf_cookie != submitted:
+    if not csrf_cookie or not hmac.compare_digest(csrf_cookie, submitted):
         return "invalid CSRF token"
 
     return None
+
+
+def validate_trusted_origin():
+    """Reject browser writes that did not originate from an allowed frontend."""
+    origin = request.headers.get("Origin")
+    allowed_origins = current_app.config["ALLOWED_ORIGINS"]
+    if origin:
+        return None if origin in allowed_origins else "invalid origin"
+
+    if current_app.testing:
+        return None
+
+    return (
+        None
+        if request.host_url.rstrip("/") in allowed_origins
+        else "invalid origin"
+    )
 
 
 def revoke_user_sessions(user_id):
@@ -481,7 +554,12 @@ def revoke_user_sessions(user_id):
 
 
 def set_session_cookie(response, token, csrf_token):
-    secure_cookie = os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true"
+    configured_value = os.environ.get("SESSION_COOKIE_SECURE")
+    secure_cookie = (
+        configured_value.lower() == "true"
+        if configured_value is not None
+        else not current_app.debug and not current_app.testing
+    )
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
@@ -511,23 +589,29 @@ def validate_item_payload(data):
 
     if not isinstance(data["name"], str) or not data["name"].strip():
         return "name must be a non-empty string"
+    if len(data["name"].strip()) > 120:
+        return "name must be at most 120 characters"
 
     if "unit" in data and data["unit"] is not None:
         if not isinstance(data["unit"], str) or not data["unit"].strip():
             return "unit must be a non-empty string"
+        if len(data["unit"].strip()) > 40:
+            return "unit must be at most 40 characters"
 
     if "category" in data and data["category"] is not None:
         if not isinstance(data["category"], str):
             return "category must be a string or null"
+        if len(data["category"].strip()) > 80:
+            return "category must be at most 80 characters"
 
     if "quantity" in data and data["quantity"] is not None:
         try:
-            quantity = float(data["quantity"])
-        except (TypeError, ValueError):
+            quantity = Decimal(str(data["quantity"]))
+        except (InvalidOperation, TypeError, ValueError):
             return "quantity must be a number"
 
-        if quantity < 0:
-            return "quantity must be greater than or equal to 0"
+        if not quantity.is_finite() or quantity <= 0:
+            return "quantity must be greater than 0"
 
     if "expiry_date" in data and data["expiry_date"] is not None:
         if not isinstance(data["expiry_date"], str):
@@ -543,9 +627,9 @@ def validate_item_payload(data):
 
 def parse_quantity(value):
     if value is None:
-        return 1.0
+        return Decimal("1")
 
-    return float(value)
+    return Decimal(str(value))
 
 
 def parse_expiry_date(value):
@@ -567,14 +651,8 @@ def predict_category(item_name):
     return category_model.predict([item_name])[0]
 
 
-def initialize_database(app):
-    with app.app_context():
-        db.create_all()
-
-
 app = create_app()
 
 
 if __name__ == "__main__":
-    initialize_database(app)
     app.run(host="0.0.0.0", port=5000)

@@ -14,6 +14,23 @@ function formatDate(value) {
   }).format(new Date(`${value}T00:00:00`))
 }
 
+function expiryPresentation(expiryDate) {
+  const today = new Date()
+  const todayAtMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const target = new Date(`${expiryDate}T00:00:00`)
+  const daysUntilExpiry = Math.ceil((target - todayAtMidnight) / 86_400_000)
+
+  if (daysUntilExpiry <= 3) {
+    return { label: "Use soon", className: "border-red-300 bg-red-50 text-red-800" }
+  }
+
+  if (daysUntilExpiry <= 7) {
+    return { label: "Plan this week", className: "border-amber-300 bg-amber-50 text-amber-900" }
+  }
+
+  return { label: "Fresh", className: "border-emerald-300 bg-emerald-50 text-emerald-900" }
+}
+
 export function ItemList({ items, isLoading }) {
   if (isLoading) {
     return (
@@ -65,6 +82,14 @@ export function ItemList({ items, isLoading }) {
               <span className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-secondary-foreground">
                 {item.category || "Unsorted"}
               </span>
+              {(() => {
+                const expiry = expiryPresentation(item.expiry_date)
+                return (
+                  <span className={cn("rounded-full border px-2.5 py-1 text-xs font-semibold", expiry.className)}>
+                    {expiry.label}
+                  </span>
+                )
+              })()}
             </div>
             <p className="mt-2 text-sm text-muted-foreground">
               {item.quantity} {item.unit}

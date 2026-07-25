@@ -25,6 +25,17 @@ function readCookie(name) {
   return decodeURIComponent(match.split("=").slice(1).join("="))
 }
 
+function mergeUpdatedItems(currentItems, changedItems) {
+  const itemsById = new Map(currentItems.map((item) => [item.id, item]))
+
+  changedItems.forEach((item) => itemsById.set(item.id, item))
+
+  return [...itemsById.values()].sort(
+    (left, right) =>
+      left.expiry_date.localeCompare(right.expiry_date) || left.id - right.id,
+  )
+}
+
 function App() {
   const [user, setUser] = useState(null)
   const [items, setItems] = useState([])
@@ -65,6 +76,10 @@ function App() {
   async function fetchSession() {
     const payload = await requestJSON("/auth/me", { method: "GET", headers: {} })
     setUser(payload.user)
+    if (payload.session_expired) {
+      setAuthMode("login")
+      setAuthError("Your session expired. Please sign in again to keep using FreshTracker.")
+    }
     return payload.user
   }
 
@@ -137,7 +152,11 @@ function App() {
         body: JSON.stringify(formValues),
       })
 
-      setItems((currentItems) => [payload.item, ...currentItems])
+      // The API may have filled an existing stack instead of creating a new row.
+      // Merge by database id so the client cannot render a duplicate stack.
+      setItems((currentItems) =>
+        mergeUpdatedItems(currentItems, payload.stacked_items ?? [payload.item]),
+      )
     } catch (requestError) {
       setError(requestError.message)
       throw requestError
@@ -289,7 +308,7 @@ function App() {
                   type="password"
                   autoComplete={authMode === "register" ? "new-password" : "current-password"}
                   required
-                  minLength={8}
+                  minLength={12}
                   maxLength={128}
                   value={authValues.password}
                   onChange={(event) =>
@@ -298,7 +317,7 @@ function App() {
                       password: event.target.value,
                     }))
                   }
-                  placeholder="Enter your password"
+                  placeholder="Use at least 12 characters"
                 />
               </div>
 
