@@ -26,6 +26,21 @@ def client(app):
     return app.test_client()
 
 
+def register_user(client, email="tester@example.com", password="password123"):
+    response = client.post(
+        "/auth/register",
+        json={"email": email, "password": password},
+    )
+    assert response.status_code == 201
+    return response
+
+
+def csrf_headers(client):
+    csrf_cookie = client.get_cookie("freshtracker_csrf")
+    assert csrf_cookie is not None
+    return {"X-CSRF-Token": csrf_cookie.value}
+
+
 def test_health_returns_ok_status(client):
     response = client.get("/health")
 
@@ -33,9 +48,40 @@ def test_health_returns_ok_status(client):
     assert response.get_json() == {"status": "ok"}
 
 
+def test_register_login_and_logout_flow(client):
+    response = client.post(
+        "/auth/register",
+        json={"email": "tester@example.com", "password": "password123"},
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["user"] == {
+        "id": 1,
+        "email": "tester@example.com",
+    }
+    assert "freshtracker_session=" in response.headers.get("Set-Cookie", "")
+    assert "freshtracker_csrf=" in response.headers.get("Set-Cookie", "")
+
+    client.post("/auth/logout", headers=csrf_headers(client))
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "tester@example.com", "password": "password123"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["user"] == {
+        "id": 1,
+        "email": "tester@example.com",
+    }
+
+
 def test_create_item_returns_created_item(client):
+    register_user(client)
+
     response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Milk",
             "category": "Dairy",
@@ -59,9 +105,11 @@ def test_create_item_returns_created_item(client):
 
 def test_create_item_predicts_missing_category(monkeypatch, client):
     monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+    register_user(client)
 
     response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={"name": "Spinach"},
     )
 
@@ -79,9 +127,11 @@ def test_create_item_predicts_missing_category(monkeypatch, client):
 
 def test_create_item_stacks_matching_items(monkeypatch, client):
     monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+    register_user(client)
 
     first_response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Spinach",
             "quantity": 2,
@@ -93,6 +143,7 @@ def test_create_item_stacks_matching_items(monkeypatch, client):
 
     second_response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Spinach",
             "quantity": 3,
@@ -130,9 +181,11 @@ def test_create_item_stacks_matching_items(monkeypatch, client):
 
 def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
     monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+    register_user(client)
 
     first_response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Tomatoes",
             "quantity": 8,
@@ -144,6 +197,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
 
     second_response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Tomatoes",
             "quantity": 5,
@@ -209,15 +263,18 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
 
 
 def test_create_item_rejects_missing_name(client):
-    response = client.post("/items", json={"quantity": 1})
+    register_user(client)
+    response = client.post("/items", headers=csrf_headers(client), json={"quantity": 1})
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "missing required field(s): name"}
 
 
 def test_create_item_rejects_invalid_expiry_date(client):
+    register_user(client)
     response = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Milk",
             "quantity": 1,
@@ -232,9 +289,11 @@ def test_create_item_rejects_invalid_expiry_date(client):
 
 def test_list_items_only_returns_active_items(monkeypatch, client):
     monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
+    register_user(client)
 
     client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Spinach",
             "quantity": 1,
@@ -244,6 +303,7 @@ def test_list_items_only_returns_active_items(monkeypatch, client):
     )
     created = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Yogurt",
             "quantity": 2,
@@ -270,8 +330,10 @@ def test_list_items_only_returns_active_items(monkeypatch, client):
 
 
 def test_patch_item_updates_status(client):
+    register_user(client)
     item = client.post(
         "/items",
+        headers=csrf_headers(client),
         json={
             "name": "Bread",
             "quantity": 1,
@@ -280,21 +342,27 @@ def test_patch_item_updates_status(client):
         },
     ).get_json()["item"]
 
-    response = client.patch(f"/items/{item['id']}", json={"status": "wasted"})
+    response = client.patch(
+        f"/items/{item['id']}",
+        headers=csrf_headers(client),
+        json={"status": "wasted"},
+    )
 
     assert response.status_code == 200
     assert response.get_json()["item"]["status"] == "wasted"
 
 
 def test_patch_item_rejects_invalid_status(client):
-    response = client.patch("/items/1", json={"status": "active"})
+    register_user(client)
+    response = client.patch("/items/1", headers=csrf_headers(client), json={"status": "active"})
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "status must be either 'used' or 'wasted'"}
 
 
 def test_patch_item_returns_not_found(client):
-    response = client.patch("/items/999", json={"status": "used"})
+    register_user(client)
+    response = client.patch("/items/999", headers=csrf_headers(client), json={"status": "used"})
 
     assert response.status_code == 404
     assert response.get_json() == {"error": "item not found"}

@@ -21,13 +21,36 @@ services:
     environment:
       FLASK_ENV: development
       DATABASE_URL: postgresql://freshtracker:freshtracker@db:5432/freshtracker
+      SESSION_COOKIE_SECURE: "false"
     ports:
       - "5000:5000"
     volumes:
       - ./ml-brain:/app/ml-brain:ro
+    command: ["python", "app.py"]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health').read()\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     depends_on:
       db:
         condition: service_healthy
+
+  freshtracker-web:
+    build:
+      context: ./freshtracker-web
+    environment:
+      VITE_API_PROXY_TARGET: http://flask-api:5000
+    ports:
+      - "5173:5173"
+    depends_on:
+      flask-api:
+        condition: service_started
 
 volumes:
   postgres_data:
