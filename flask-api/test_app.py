@@ -1,8 +1,17 @@
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy.exc import StatementError
 
-from app import Session, create_app, db, now_utc
+from app import (
+    InventoryItem,
+    Session,
+    User,
+    WasteLog,
+    create_app,
+    db,
+    now_utc,
+)
 
 
 @pytest.fixture()
@@ -16,7 +25,10 @@ def app():
 
     with test_app.app_context():
         db.create_all()
-        yield test_app
+
+    yield test_app
+
+    with test_app.app_context():
         db.session.remove()
         db.drop_all()
 
@@ -70,8 +82,9 @@ def test_register_login_and_logout_flow(client):
         "id": 1,
         "email": "tester@example.com",
     }
-    assert "freshtracker_session=" in response.headers.get("Set-Cookie", "")
-    assert "freshtracker_csrf=" in response.headers.get("Set-Cookie", "")
+    set_cookie_headers = response.headers.getlist("Set-Cookie")
+    assert any("freshtracker_session=" in header for header in set_cookie_headers)
+    assert any("freshtracker_csrf=" in header for header in set_cookie_headers)
 
     client.post("/auth/logout", headers=csrf_headers(client))
 
@@ -112,6 +125,65 @@ def test_create_item_returns_created_item(client):
         "expiry_date": "2026-07-01",
         "status": "active",
     }
+
+
+def test_new_inventory_item_defaults_alert_sent_to_false(app, client):
+    register_user(client)
+    client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk"},
+    )
+
+    with app.app_context():
+        assert InventoryItem.query.one().alert_sent is False
+
+
+def test_waste_log_records_supported_action_and_timestamp(app, client):
+    register_user(client)
+    client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk", "category": "Dairy"},
+    )
+
+    with app.app_context():
+        item = InventoryItem.query.one()
+        user = User.query.one()
+        log = WasteLog(
+            item_id=item.id,
+            user_id=user.id,
+            action="wasted",
+            category=item.category,
+        )
+        db.session.add(log)
+        db.session.commit()
+        db.session.refresh(log)
+
+        assert log.action == "wasted"
+        assert log.category == "Dairy"
+        assert log.logged_at is not None
+
+
+def test_waste_log_rejects_unsupported_action(app, client):
+    register_user(client)
+    client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk"},
+    )
+
+    with app.app_context():
+        log = WasteLog(
+            item_id=InventoryItem.query.one().id,
+            user_id=User.query.one().id,
+            action="donated",
+        )
+        db.session.add(log)
+
+        with pytest.raises(StatementError):
+            db.session.commit()
+        db.session.rollback()
 
 
 def test_create_item_predicts_missing_category(monkeypatch, client):

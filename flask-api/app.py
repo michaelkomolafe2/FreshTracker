@@ -60,6 +60,13 @@ class InventoryItem(db.Model):
     unit = db.Column(db.String(40), nullable=False)
     expiry_date = db.Column(db.Date, nullable=False)
     status = db.Column(db.String(20), nullable=False, default="active")
+    alert_sent = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False,
+        server_default=db.false(),
+    )
+    waste_logs = db.relationship("WasteLog", back_populates="item")
 
     __table_args__ = (
         db.Index(
@@ -95,6 +102,7 @@ class User(db.Model):
     email = db.Column(db.String(254), nullable=False, unique=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     inventory_items = db.relationship("InventoryItem", back_populates="user")
+    waste_logs = db.relationship("WasteLog", back_populates="user")
 
     def to_dict(self):
         return {
@@ -115,6 +123,40 @@ class Session(db.Model):
     last_seen_at = db.Column(db.DateTime(timezone=True), nullable=False)
     expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
     revoked_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+
+class WasteLog(db.Model):
+    __tablename__ = "waste_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    item_id = db.Column(
+        db.Integer,
+        db.ForeignKey("inventory_items.id"),
+        nullable=False,
+    )
+    item = db.relationship("InventoryItem", back_populates="waste_logs")
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    user = db.relationship("User", back_populates="waste_logs")
+    action = db.Column(
+        db.Enum(
+            "used",
+            "wasted",
+            name="waste_action",
+            create_constraint=True,
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
+    category = db.Column(db.String(80), nullable=True)
+    logged_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=db.func.now(),
+    )
+
+    __table_args__ = (
+        db.Index("ix_waste_logs_user_logged_at", "user_id", "logged_at"),
+    )
 
 
 def build_stack_key(name, unit, expiry_date):
@@ -180,7 +222,7 @@ def create_app(config=None):
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
         "DATABASE_URL",
-        "postgresql://freshtracker:freshtracker@db:5432/freshtracker",
+        "sqlite:///freshtracker.db",
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["ALLOWED_ORIGINS"] = ALLOWED_ORIGINS
