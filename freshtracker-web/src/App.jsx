@@ -41,6 +41,7 @@ function App() {
   const [items, setItems] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
+  const [pendingItemActions, setPendingItemActions] = useState([])
   const [authMode, setAuthMode] = useState("login")
   const [authValues, setAuthValues] = useState(initialAuthValues)
   const [authBusy, setAuthBusy] = useState(false)
@@ -162,6 +163,30 @@ function App() {
       throw requestError
     } finally {
       setIsAdding(false)
+    }
+  }
+
+  async function updateItemStatus(item, status) {
+    setError("")
+    setPendingItemActions((currentIds) => [...currentIds, item.id])
+    setItems((currentItems) =>
+      currentItems.filter((currentItem) => currentItem.id !== item.id),
+    )
+
+    try {
+      await requestJSON(`/items/${item.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      })
+    } catch (requestError) {
+      setItems((currentItems) => mergeUpdatedItems(currentItems, [item]))
+      setError(
+        `Could not mark ${item.name} as ${status}. ${requestError.message}`,
+      )
+    } finally {
+      setPendingItemActions((currentIds) =>
+        currentIds.filter((itemId) => itemId !== item.id),
+      )
     }
   }
 
@@ -410,7 +435,7 @@ function App() {
                   variant="secondary"
                   className="justify-start"
                   onClick={fetchItems}
-                  disabled={isLoading}
+                  disabled={isLoading || pendingItemActions.length > 0}
                 >
                   <RefreshCcw className="h-4 w-4" />
                   Refresh
@@ -428,7 +453,11 @@ function App() {
               </div>
             ) : null}
 
-            <ItemList items={items} isLoading={isLoading} />
+            <ItemList
+              items={items}
+              isLoading={isLoading}
+              onUpdateStatus={updateItemStatus}
+            />
           </div>
         </section>
       </div>

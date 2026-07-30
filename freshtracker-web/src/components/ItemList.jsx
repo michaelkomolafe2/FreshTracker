@@ -1,5 +1,6 @@
-import { CalendarDays, PackageOpen } from "lucide-react"
+import { CalendarDays, CircleCheck, PackageOpen, Trash2 } from "lucide-react"
 
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 function formatDate(value) {
@@ -31,7 +32,7 @@ function expiryPresentation(expiryDate) {
   return { label: "Fresh", className: "border-emerald-300 bg-emerald-50 text-emerald-900" }
 }
 
-export function ItemList({ items, isLoading }) {
+export function ItemList({ items, isLoading, onUpdateStatus }) {
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -96,9 +97,33 @@ export function ItemList({ items, isLoading }) {
             </p>
           </div>
 
-          <div className="flex items-center gap-2 text-sm text-muted-foreground sm:justify-end">
-            <CalendarDays className="h-4 w-4 text-primary" />
-            <span>{formatDate(item.expiry_date)}</span>
+          <div className="space-y-3 sm:text-right">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground sm:justify-end">
+              <CalendarDays className="h-4 w-4 text-primary" />
+              <span>{formatDate(item.expiry_date)}</span>
+            </div>
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => onUpdateStatus(item, "used")}
+                aria-label={`Mark ${item.name} as used`}
+              >
+                <CircleCheck className="h-4 w-4" />
+                Used
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="border-harvest-clay/40 text-harvest-clay hover:bg-harvest-clay hover:text-harvest-paper"
+                onClick={() => onUpdateStatus(item, "wasted")}
+                aria-label={`Mark ${item.name} as wasted`}
+              >
+                <Trash2 className="h-4 w-4" />
+                Wasted
+              </Button>
+            </div>
           </div>
         </article>
       ))}

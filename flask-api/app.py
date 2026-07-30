@@ -1,17 +1,23 @@
-import os
 import hashlib
 import hmac
+import json
+import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
-from secrets import token_urlsafe
 from pathlib import Path
+from secrets import token_urlsafe
+from zoneinfo import ZoneInfo
 
+import click
 import joblib
+from apscheduler.schedulers.blocking import BlockingScheduler
 from flask import Flask, current_app, g, jsonify, request
+from flask_mail import Mail, Message
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -30,6 +36,7 @@ category_model = joblib.load(MODEL_PATH)
 
 db = SQLAlchemy()
 migrate = Migrate()
+mail = Mail()
 
 MAX_STACK_QUANTITY = Decimal("10")
 SESSION_COOKIE_NAME = "freshtracker_session"
@@ -80,6 +87,18 @@ class InventoryItem(db.Model):
             "user_id",
             "status",
             "expiry_date",
+        ),
+        db.Index(
+            "ix_inventory_items_expiry_alert_candidates",
+            "expiry_date",
+            postgresql_where=db.and_(
+                alert_sent.is_(False),
+                status == "active",
+            ),
+            sqlite_where=db.and_(
+                alert_sent.is_(False),
+                status == "active",
+            ),
         ),
     )
 
@@ -219,6 +238,7 @@ def apply_item_stack(user_id, existing_stacks, name, category, unit, expiry_date
 
 
 def create_app(config=None):
+    provided_config = config or {}
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
         "DATABASE_URL",
@@ -226,12 +246,45 @@ def create_app(config=None):
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["ALLOWED_ORIGINS"] = ALLOWED_ORIGINS
+    app.config["MAIL_ENABLED"] = env_flag("MAIL_ENABLED", default=False)
+    app.config["MAIL_SERVER"] = os.environ.get("MAIL_SERVER", "")
+    app.config["MAIL_PORT"] = int(os.environ.get("MAIL_PORT", "587"))
+    app.config["MAIL_USE_TLS"] = env_flag("MAIL_USE_TLS", default=True)
+    app.config["MAIL_USE_SSL"] = env_flag("MAIL_USE_SSL", default=False)
+    app.config["MAIL_USERNAME"] = os.environ.get("MAIL_USERNAME")
+    app.config["MAIL_PASSWORD"] = os.environ.get("MAIL_PASSWORD")
+    app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_DEFAULT_SENDER")
+    app.config["MAIL_SUPPRESS_SEND"] = not app.config["MAIL_ENABLED"]
+    app.config["EXPIRY_ALERT_TIMEZONE"] = os.environ.get(
+        "EXPIRY_ALERT_TIMEZONE",
+        "UTC",
+    )
+    app.config["EXPIRY_ALERT_HOUR"] = int(
+        os.environ.get("EXPIRY_ALERT_HOUR", "7")
+    )
+    app.config["EXPIRY_ALERT_MINUTE"] = int(
+        os.environ.get("EXPIRY_ALERT_MINUTE", "0")
+    )
 
-    if config:
-        app.config.update(config)
+    app.config.update(provided_config)
+    if "MAIL_SUPPRESS_SEND" not in provided_config:
+        app.config["MAIL_SUPPRESS_SEND"] = not app.config["MAIL_ENABLED"]
+    if (
+        app.config["MAIL_SUPPRESS_SEND"]
+        and not app.config["MAIL_DEFAULT_SENDER"]
+    ):
+        app.config["MAIL_DEFAULT_SENDER"] = (
+            "FreshTracker <no-reply@freshtracker.local>"
+        )
+
+    validate_mail_config(app.config)
+    validate_expiry_alert_config(app.config)
 
     db.init_app(app)
     migrate.init_app(app, db)
+    mail.init_app(app)
+    app.cli.add_command(run_expiry_alert_scheduler)
+    app.cli.add_command(send_expiry_alerts_once)
 
     @app.errorhandler(HTTPException)
     def json_http_error(error):
@@ -438,23 +491,246 @@ def create_app(config=None):
         if status not in {"used", "wasted"}:
             return jsonify({"error": "status must be either 'used' or 'wasted'"}), 400
 
-        item = InventoryItem.query.filter_by(
-            id=item_id,
-            user_id=get_current_user().id,
-        ).first()
-        if item is None:
-            return jsonify({"error": "item not found"}), 404
+        user_id = get_current_user().id
 
-        item.status = status
-        db.session.commit()
+        # Session authentication performs a read before the view and SQLAlchemy
+        # autobegins for it. End that read-only unit so this view owns the full
+        # status-and-log write transaction explicitly.
+        db.session.rollback()
+        with db.session.begin():
+            item = (
+                InventoryItem.query.filter_by(
+                    id=item_id,
+                    user_id=user_id,
+                )
+                .with_for_update()
+                .first()
+            )
+            if item is None:
+                return jsonify({"error": "item not found"}), 404
+            if item.status != "active":
+                return jsonify({"error": "item is no longer active"}), 409
 
-        return jsonify({"item": item.to_dict()})
+            item.status = status
+            db.session.flush()
+            db.session.add(
+                WasteLog(
+                    item_id=item.id,
+                    user_id=user_id,
+                    action=status,
+                    category=item.category,
+                )
+            )
+            db.session.flush()
+            item_payload = item.to_dict()
+
+        return jsonify({"item": item_payload})
 
     return app
 
 
 def normalize_email(email):
     return email.strip().casefold()
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def validate_mail_config(config):
+    if config["MAIL_USE_TLS"] and config["MAIL_USE_SSL"]:
+        raise ValueError("MAIL_USE_TLS and MAIL_USE_SSL cannot both be enabled")
+
+    if config["MAIL_ENABLED"]:
+        missing = [
+            name
+            for name in ("MAIL_SERVER", "MAIL_DEFAULT_SENDER")
+            if not config.get(name)
+        ]
+        if missing:
+            raise ValueError(
+                f"MAIL_ENABLED requires: {', '.join(missing)}"
+            )
+
+
+def validate_expiry_alert_config(config):
+    ZoneInfo(config["EXPIRY_ALERT_TIMEZONE"])
+    if not 0 <= config["EXPIRY_ALERT_HOUR"] <= 23:
+        raise ValueError("EXPIRY_ALERT_HOUR must be between 0 and 23")
+    if not 0 <= config["EXPIRY_ALERT_MINUTE"] <= 59:
+        raise ValueError("EXPIRY_ALERT_MINUTE must be between 0 and 59")
+
+
+def alert_calendar_date():
+    return datetime.now(
+        ZoneInfo(current_app.config["EXPIRY_ALERT_TIMEZONE"])
+    ).date()
+
+
+def claim_expiring_inventory_items(cutoff_date):
+    columns = expiry_alert_columns()
+    statement = (
+        update(InventoryItem)
+        .where(*expiry_alert_predicates(cutoff_date))
+        .values(alert_sent=True)
+        .returning(*columns)
+    )
+    claimed_items = [
+        dict(item)
+        for item in db.session.execute(statement).mappings().all()
+    ]
+    db.session.commit()
+    return claimed_items
+
+
+def preview_expiring_inventory_items(cutoff_date):
+    statement = (
+        select(*expiry_alert_columns())
+        .where(*expiry_alert_predicates(cutoff_date))
+        .order_by(InventoryItem.expiry_date, InventoryItem.id)
+    )
+    return [
+        dict(item)
+        for item in db.session.execute(statement).mappings().all()
+    ]
+
+
+def expiry_alert_columns():
+    return (
+        InventoryItem.id,
+        InventoryItem.user_id,
+        InventoryItem.name,
+        InventoryItem.quantity,
+        InventoryItem.unit,
+        InventoryItem.expiry_date,
+    )
+
+
+def expiry_alert_predicates(cutoff_date):
+    return (
+        InventoryItem.expiry_date <= cutoff_date,
+        InventoryItem.status == "active",
+        InventoryItem.alert_sent.is_(False),
+    )
+
+
+def expiry_alert_message(item, recipient):
+    return Message(
+        subject=f"FreshTracker: {item['name']} expires soon",
+        recipients=[recipient],
+        body=(
+            f"{item['name']} ({item['quantity']:g} {item['unit']}) expires on "
+            f"{item['expiry_date'].isoformat()}.\n\n"
+            "Open FreshTracker to use it before it goes to waste."
+        ),
+    )
+
+
+def send_expiry_alerts(today=None):
+    cutoff_date = (today or alert_calendar_date()) + timedelta(days=3)
+    if not current_app.config["MAIL_ENABLED"]:
+        preview_items = preview_expiring_inventory_items(cutoff_date)
+        for item in preview_items:
+            current_app.logger.info(
+                "Dry-run expiry alert: item_id=%s user_id=%s expiry_date=%s",
+                item["id"],
+                item["user_id"],
+                item["expiry_date"].isoformat(),
+            )
+        result = {
+            "claimed": 0,
+            "sent": 0,
+            "failed": 0,
+            "previewed": len(preview_items),
+        }
+        current_app.logger.info("Expiry alert dry run completed: %s", result)
+        return result
+
+    claimed_items = claim_expiring_inventory_items(cutoff_date)
+    if not claimed_items:
+        current_app.logger.info(
+            "Expiry alert job completed: no eligible inventory items"
+        )
+        return {"claimed": 0, "sent": 0, "failed": 0}
+
+    user_ids = {item["user_id"] for item in claimed_items}
+    recipients = {
+        user.id: user.email
+        for user in User.query.filter(User.id.in_(user_ids)).all()
+    }
+    sent_count = 0
+    failed_count = 0
+
+    for item in claimed_items:
+        recipient = recipients.get(item["user_id"])
+        if recipient is None:
+            failed_count += 1
+            current_app.logger.error(
+                "Cannot send expiry alert for item_id=%s: user not found",
+                item["id"],
+            )
+            continue
+        try:
+            mail.send(expiry_alert_message(item, recipient))
+            sent_count += 1
+        except Exception:
+            failed_count += 1
+            current_app.logger.exception(
+                "Failed to send expiry alert for item_id=%s",
+                item["id"],
+            )
+
+    result = {
+        "claimed": len(claimed_items),
+        "sent": sent_count,
+        "failed": failed_count,
+    }
+    current_app.logger.info("Expiry alert job completed: %s", result)
+    return result
+
+
+def execute_expiry_alert_job(app):
+    with app.app_context():
+        send_expiry_alerts()
+
+
+@click.command("run-expiry-alert-scheduler")
+def run_expiry_alert_scheduler():
+    app = current_app._get_current_object()
+    app.logger.setLevel(logging.INFO)
+    scheduler = BlockingScheduler(
+        timezone=app.config["EXPIRY_ALERT_TIMEZONE"]
+    )
+    scheduler.add_job(
+        execute_expiry_alert_job,
+        trigger="cron",
+        args=[app],
+        hour=app.config["EXPIRY_ALERT_HOUR"],
+        minute=app.config["EXPIRY_ALERT_MINUTE"],
+        id="nightly-expiry-alerts",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60 * 60,
+        next_run_time=datetime.now(
+            ZoneInfo(app.config["EXPIRY_ALERT_TIMEZONE"])
+        ),
+    )
+    app.logger.info(
+        "Starting expiry alert scheduler for %02d:%02d %s",
+        app.config["EXPIRY_ALERT_HOUR"],
+        app.config["EXPIRY_ALERT_MINUTE"],
+        app.config["EXPIRY_ALERT_TIMEZONE"],
+    )
+    scheduler.start()
+
+
+@click.command("send-expiry-alerts")
+def send_expiry_alerts_once():
+    click.echo(json.dumps(send_expiry_alerts(), sort_keys=True))
 
 
 def validate_auth_payload(data):

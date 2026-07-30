@@ -47,6 +47,30 @@ services:
       db:
         condition: service_healthy
 
+  expiry-alerts:
+    build:
+      context: ./flask-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      MAIL_SERVER: ${MAIL_SERVER:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USE_TLS: ${MAIL_USE_TLS:-true}
+      MAIL_USE_SSL: ${MAIL_USE_SSL:-false}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_DEFAULT_SENDER: ${MAIL_DEFAULT_SENDER:-}
+      EXPIRY_ALERT_TIMEZONE: ${EXPIRY_ALERT_TIMEZONE:-UTC}
+      EXPIRY_ALERT_HOUR: ${EXPIRY_ALERT_HOUR:-7}
+      EXPIRY_ALERT_MINUTE: ${EXPIRY_ALERT_MINUTE:-0}
+    volumes:
+      - ./ml-brain:/app/ml-brain:ro
+    command: ["flask", "--app", "app:app", "run-expiry-alert-scheduler"]
+    restart: unless-stopped
+    depends_on:
+      flask-api:
+        condition: service_healthy
+
   freshtracker-web:
     build:
       context: ./freshtracker-web

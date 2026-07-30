@@ -8,9 +8,12 @@ from app import (
     Session,
     User,
     WasteLog,
+    build_stack_key,
     create_app,
     db,
+    mail,
     now_utc,
+    send_expiry_alerts,
 )
 
 
@@ -20,6 +23,8 @@ def app():
         {
             "TESTING": True,
             "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+            "MAIL_ENABLED": False,
+            "MAIL_SUPPRESS_SEND": True,
         }
     )
 
@@ -136,6 +141,131 @@ def test_new_inventory_item_defaults_alert_sent_to_false(app, client):
     )
 
     with app.app_context():
+        assert InventoryItem.query.one().alert_sent is False
+
+
+def test_expiry_alert_job_emails_each_item_only_once(app):
+    today = date(2026, 7, 30)
+
+    with app.app_context():
+        user = User(
+            email="alerts@example.com",
+            password_hash="not-used-by-this-test",
+        )
+        db.session.add(user)
+        db.session.flush()
+
+        items = [
+            InventoryItem(
+                user_id=user.id,
+                name="Milk",
+                stack_key=build_stack_key("Milk", "bottle", today),
+                quantity=1,
+                unit="bottle",
+                expiry_date=today,
+                status="active",
+            ),
+            InventoryItem(
+                user_id=user.id,
+                name="Yogurt",
+                stack_key=build_stack_key(
+                    "Yogurt",
+                    "pot",
+                    today + timedelta(days=3),
+                ),
+                quantity=2,
+                unit="pot",
+                expiry_date=today + timedelta(days=3),
+                status="active",
+            ),
+            InventoryItem(
+                user_id=user.id,
+                name="Cheese",
+                stack_key=build_stack_key(
+                    "Cheese",
+                    "block",
+                    today + timedelta(days=4),
+                ),
+                quantity=1,
+                unit="block",
+                expiry_date=today + timedelta(days=4),
+                status="active",
+            ),
+            InventoryItem(
+                user_id=user.id,
+                name="Bread",
+                stack_key=build_stack_key("Bread", "loaf", today),
+                quantity=1,
+                unit="loaf",
+                expiry_date=today,
+                status="used",
+            ),
+        ]
+        db.session.add_all(items)
+        db.session.commit()
+        app.config["MAIL_ENABLED"] = True
+
+        with mail.record_messages() as delivered_messages:
+            first_result = send_expiry_alerts(today=today)
+            second_result = send_expiry_alerts(today=today)
+
+        assert first_result == {"claimed": 2, "sent": 2, "failed": 0}
+        assert second_result == {"claimed": 0, "sent": 0, "failed": 0}
+        assert len(delivered_messages) == 2
+        assert {
+            message.subject for message in delivered_messages
+        } == {
+            "FreshTracker: Milk expires soon",
+            "FreshTracker: Yogurt expires soon",
+        }
+        assert all(
+            message.recipients == ["alerts@example.com"]
+            for message in delivered_messages
+        )
+        alert_states = {
+            item.name: item.alert_sent
+            for item in InventoryItem.query.order_by(InventoryItem.id).all()
+        }
+        assert alert_states == {
+            "Milk": True,
+            "Yogurt": True,
+            "Cheese": False,
+            "Bread": False,
+        }
+
+
+def test_expiry_alert_dry_run_does_not_claim_or_email_items(app):
+    today = date(2026, 7, 30)
+
+    with app.app_context():
+        user = User(
+            email="dry-run@example.com",
+            password_hash="not-used-by-this-test",
+        )
+        db.session.add(user)
+        db.session.flush()
+        item = InventoryItem(
+            user_id=user.id,
+            name="Milk",
+            stack_key=build_stack_key("Milk", "bottle", today),
+            quantity=1,
+            unit="bottle",
+            expiry_date=today,
+            status="active",
+        )
+        db.session.add(item)
+        db.session.commit()
+
+        with mail.record_messages() as delivered_messages:
+            result = send_expiry_alerts(today=today)
+
+        assert result == {
+            "claimed": 0,
+            "sent": 0,
+            "failed": 0,
+            "previewed": 1,
+        }
+        assert delivered_messages == []
         assert InventoryItem.query.one().alert_sent is False
 
 
@@ -416,7 +546,8 @@ def test_list_items_only_returns_active_items(monkeypatch, client):
     ]
 
 
-def test_patch_item_updates_status(client):
+@pytest.mark.parametrize("status", ["used", "wasted"])
+def test_patch_item_updates_status_and_creates_waste_log(app, client, status):
     register_user(client)
     item = client.post(
         "/items",
@@ -432,11 +563,76 @@ def test_patch_item_updates_status(client):
     response = client.patch(
         f"/items/{item['id']}",
         headers=csrf_headers(client),
-        json={"status": "wasted"},
+        json={"status": status},
     )
 
     assert response.status_code == 200
-    assert response.get_json()["item"]["status"] == "wasted"
+    assert response.get_json()["item"]["status"] == status
+    with app.app_context():
+        log = WasteLog.query.one()
+        assert log.item_id == item["id"]
+        assert log.user_id == User.query.one().id
+        assert log.action == status
+        assert log.category == InventoryItem.query.one().category
+        assert log.logged_at is not None
+
+
+def test_patch_item_rolls_back_status_when_waste_log_creation_fails(
+    app,
+    client,
+    monkeypatch,
+):
+    register_user(client)
+    item = client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Bread", "category": "Bakery"},
+    ).get_json()["item"]
+
+    def fail_waste_log_creation(**_kwargs):
+        raise RuntimeError("forced waste log failure")
+
+    monkeypatch.setattr("app.WasteLog", fail_waste_log_creation)
+
+    with pytest.raises(RuntimeError, match="forced waste log failure"):
+        client.patch(
+            f"/items/{item['id']}",
+            headers=csrf_headers(client),
+            json={"status": "used"},
+        )
+
+    with app.app_context():
+        db.session.expire_all()
+        assert InventoryItem.query.one().status == "active"
+        assert WasteLog.query.count() == 0
+
+
+def test_patch_item_rejects_a_second_transition(app, client):
+    register_user(client)
+    item = client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Bread"},
+    ).get_json()["item"]
+    headers = csrf_headers(client)
+
+    first_response = client.patch(
+        f"/items/{item['id']}",
+        headers=headers,
+        json={"status": "used"},
+    )
+    second_response = client.patch(
+        f"/items/{item['id']}",
+        headers=headers,
+        json={"status": "wasted"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.get_json() == {"error": "item is no longer active"}
+    with app.app_context():
+        assert InventoryItem.query.one().status == "used"
+        assert WasteLog.query.count() == 1
 
 
 def test_patch_item_rejects_invalid_status(client):
@@ -459,6 +655,23 @@ def test_authenticated_writes_require_a_matching_csrf_token(client):
     register_user(client)
 
     response = client.post("/items", json={"name": "Milk"})
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "missing CSRF token"}
+
+
+def test_patch_item_requires_a_matching_csrf_token(client):
+    register_user(client)
+    item = client.post(
+        "/items",
+        headers=csrf_headers(client),
+        json={"name": "Milk"},
+    ).get_json()["item"]
+
+    response = client.patch(
+        f"/items/{item['id']}",
+        json={"status": "used"},
+    )
 
     assert response.status_code == 403
     assert response.get_json() == {"error": "missing CSRF token"}
