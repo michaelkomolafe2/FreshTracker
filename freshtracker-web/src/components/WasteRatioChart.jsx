@@ -64,8 +64,8 @@ export function WasteRatioChart({ categories, isLoading }) {
 
   return (
     <Card>
-      <CardHeader className="gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
+      <CardHeader className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
             Logged outcomes
           </p>
@@ -75,7 +75,7 @@ export function WasteRatioChart({ categories, isLoading }) {
             or weight.
           </p>
         </div>
-        <div className="flex items-center gap-4 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
           <span className="flex items-center gap-2">
             <span className="h-2.5 w-2.5 rounded-sm bg-harvest-forest" />
             Used

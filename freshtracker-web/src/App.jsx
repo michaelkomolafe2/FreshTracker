@@ -370,7 +370,7 @@ function App() {
   if (!user) {
     return (
       <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(130,170,125,0.22),_transparent_32%),linear-gradient(180deg,_#f7f2e7_0%,_#f3eadb_100%)] px-5 py-10 text-slate-900 sm:px-8">
-        <div className="mx-auto grid min-h-[calc(100vh-5rem)] w-full max-w-6xl items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="mx-auto grid min-h-[calc(100vh-5rem)] w-full max-w-6xl items-center gap-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.9fr)]">
           <section className="space-y-6">
             <div className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white/70 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-600 backdrop-blur">
               <span className="h-2 w-2 rounded-full bg-emerald-700" />
@@ -398,8 +398,8 @@ function App() {
           </section>
 
           <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_30px_90px_rgba(15,23,42,0.12)] sm:p-8">
-            <div className="mb-6 flex items-center justify-between gap-4">
-              <div>
+            <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
                 <h2 className="text-2xl font-semibold tracking-tight">
                   {authMode === "register" ? "Create account" : "Sign in"}
                 </h2>
@@ -512,10 +512,10 @@ function App() {
 
   return (
     <main className="min-h-screen bg-background">
-      <div className="mx-auto grid min-h-screen w-full max-w-[1440px] grid-cols-1 lg:grid-cols-[410px_minmax(0,1fr)]">
-        <aside className="border-b border-border bg-harvest-paper px-5 py-6 sm:px-8 lg:sticky lg:top-0 lg:h-screen lg:border-b-0 lg:border-r lg:px-10 lg:py-10">
+      <div className="mx-auto grid min-h-screen w-full max-w-[1440px] grid-cols-1 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] 2xl:grid-cols-[410px_minmax(0,1fr)]">
+        <aside className="border-b border-border bg-harvest-paper px-5 py-6 sm:px-8 xl:sticky xl:top-0 xl:h-screen xl:overflow-y-auto xl:border-b-0 xl:border-r xl:px-10 xl:py-10">
           <div className="flex h-full flex-col justify-between gap-10">
-            <div className="space-y-9">
+            <div className="space-y-9 md:grid md:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)] md:items-start md:gap-8 md:space-y-0 xl:block xl:space-y-9">
               <div className="space-y-5">
                 <div className="inline-flex items-center gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   <span className="h-2 w-2 rounded-full bg-primary" />
@@ -556,7 +556,7 @@ function App() {
               </div>
             </div>
 
-            <div className="hidden max-w-xs border-t border-border pt-5 text-sm leading-6 text-muted-foreground lg:block">
+            <div className="hidden max-w-xs border-t border-border pt-5 text-sm leading-6 text-muted-foreground xl:block">
               <p>
                 Today&apos;s rhythm: log it while unpacking, check it before
                 dinner, waste less without turning the kitchen into admin.
@@ -565,14 +565,14 @@ function App() {
           </div>
         </aside>
 
-        <section className="px-5 py-7 sm:px-8 lg:px-12 lg:py-10">
+        <section className="min-w-0 px-5 py-7 sm:px-8 lg:px-12 lg:py-10">
           <div className="mx-auto max-w-5xl space-y-8">
-            <header className="flex flex-col gap-5 border-b border-border pb-7 md:flex-row md:items-end md:justify-between">
-              <div className="space-y-3">
+            <header className="flex flex-wrap items-end justify-between gap-5 border-b border-border pb-7">
+              <div className="min-w-0 flex-1 space-y-3">
                 <p className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   Kitchen inventory
                 </p>
-                <div className="flex items-end gap-4">
+                <div className="flex flex-wrap items-end gap-4">
                   <h2 className="font-display text-4xl font-semibold leading-none text-foreground sm:text-5xl">
                     The current shelf
                   </h2>
@@ -580,14 +580,14 @@ function App() {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                <p className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-muted-foreground">
+              <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 sm:w-auto">
+                <p className="flex min-h-11 items-center rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-muted-foreground sm:rounded-full">
                   {itemCountLabel}
                 </p>
                 <Button
                   type="button"
                   variant="secondary"
-                  className="justify-start"
+                  className="w-full justify-start sm:w-auto"
                   onClick={fetchDashboard}
                   disabled={
                     isLoading ||
@@ -619,8 +619,8 @@ function App() {
             </Suspense>
 
             <Card className="bg-harvest-paper">
-              <CardContent className="grid gap-4 px-4 pb-4 pt-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] xl:items-end">
-                <div className="space-y-2 md:col-span-2 xl:col-span-1">
+              <CardContent className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] items-end gap-4 px-4 pb-4 pt-4">
+                <div className="min-w-0 space-y-2">
                   <label
                     htmlFor="inventory-search"
                     className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
@@ -643,7 +643,7 @@ function App() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
+                <div className="min-w-0 space-y-2">
                   <label
                     htmlFor="inventory-category"
                     className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
@@ -665,7 +665,7 @@ function App() {
                   </Select>
                 </div>
 
-                <div className="space-y-2">
+                <div className="min-w-0 space-y-2">
                   <label
                     htmlFor="inventory-sort"
                     className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
@@ -686,6 +686,7 @@ function App() {
                 <Button
                   type="button"
                   variant="secondary"
+                  className="w-full"
                   onClick={() => {
                     setCategoryFilter(ALL_CATEGORIES)
                     setExpirySort("soonest")

@@ -86,7 +86,7 @@ export function ItemList({
         <article
           key={item.id}
           className={cn(
-            "grid gap-4 rounded-md border border-border bg-card px-4 py-4 transition-colors duration-200 ease-out hover:border-primary/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-5",
+            "grid grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] items-center gap-4 rounded-md border border-border bg-card px-4 py-4 transition-colors duration-200 ease-out hover:border-primary/40 sm:px-5",
             index === 0 && "border-primary/30",
           )}
         >
@@ -118,15 +118,16 @@ export function ItemList({
             </p>
           </div>
 
-          <div className="space-y-3 sm:text-right">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground sm:justify-end">
+          <div className="min-w-0 space-y-3">
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
               <CalendarDays className="h-4 w-4 text-primary" />
               <span>{formatDate(item.expiry_date)}</span>
             </div>
-            <div className="flex flex-wrap gap-2 sm:justify-end">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-2">
               <Button
                 type="button"
                 size="sm"
+                className="w-full"
                 onClick={() => onUpdateStatus(item, "used")}
                 aria-label={`Mark ${item.name} as used`}
               >
@@ -137,7 +138,7 @@ export function ItemList({
                 type="button"
                 size="sm"
                 variant="secondary"
-                className="border-harvest-clay/40 text-harvest-clay hover:bg-harvest-clay hover:text-harvest-paper"
+                className="w-full border-harvest-clay/40 text-harvest-clay hover:bg-harvest-clay hover:text-harvest-paper"
                 onClick={() => onUpdateStatus(item, "wasted")}
                 aria-label={`Mark ${item.name} as wasted`}
               >

@@ -117,8 +117,8 @@ export function ItemForm({ onAddItem, isAdding }) {
             />
           </div>
 
-          <div className="grid grid-cols-[1fr_1.25fr] gap-3">
-            <div className="space-y-2">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] gap-3">
+            <div className="min-w-0 space-y-2">
               <label className="text-sm font-semibold" htmlFor="quantity">
                 Quantity
               </label>
@@ -132,7 +132,7 @@ export function ItemForm({ onAddItem, isAdding }) {
               />
             </div>
 
-            <div className="space-y-2">
+            <div className="min-w-0 space-y-2">
               <label className="text-sm font-semibold">Unit</label>
               <Select
                 value={formValues.unit}
