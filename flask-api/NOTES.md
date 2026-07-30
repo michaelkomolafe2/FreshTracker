@@ -52,11 +52,16 @@ in expiry order and the API error is shown.
 
 # Recipe suggestions
 
-`POST /recipe-suggestions` accepts an authenticated JSON request shaped like
-`{"ingredients": ["milk", "spinach"]}`. Ingredient names are Unicode-normalized,
-trimmed, case-folded, deduplicated, and sorted before the list is hashed. The
-endpoint sends the Spoonacular key in the `x-api-key` header and never returns
-or logs it.
+`GET /recipe-suggestions` derives ingredients from the authenticated user's
+active inventory. It excludes expired items, places items expiring in zero
+through seven days first, deduplicates normalized names, and fills the remaining
+25-ingredient limit with longer-dated items. The response identifies the
+`priority_ingredients` so the client can explain why those recipes were chosen.
+
+The existing authenticated `POST /recipe-suggestions` remains available for
+explicit ingredient lists. Ingredient names are Unicode-normalized, trimmed,
+case-folded, and deduplicated. Both endpoints send the Spoonacular key in the
+`x-api-key` header and never return or log it.
 
 Set `SPOONACULAR_API_KEY` in the root `.env` file used by Compose. Successful
 responses are cached in-process for six hours, with a bounded 24-hour stale

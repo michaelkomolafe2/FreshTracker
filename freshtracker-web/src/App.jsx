@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select"
 import { ItemForm } from "@/components/ItemForm"
 import { ItemList } from "@/components/ItemList"
+import { RecipeSuggestions } from "@/components/RecipeSuggestions"
 
 const API_BASE = "/api"
 const ALL_CATEGORIES = "all"
@@ -84,14 +85,19 @@ function App() {
   const [user, setUser] = useState(null)
   const [items, setItems] = useState([])
   const [wasteCategories, setWasteCategories] = useState([])
+  const [recipes, setRecipes] = useState([])
+  const [recipeIngredients, setRecipeIngredients] = useState([])
+  const [priorityRecipeIngredients, setPriorityRecipeIngredients] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [isWasteSummaryLoading, setIsWasteSummaryLoading] = useState(true)
+  const [isRecipeLoading, setIsRecipeLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
   const [pendingItemActions, setPendingItemActions] = useState([])
   const [authMode, setAuthMode] = useState("login")
   const [authValues, setAuthValues] = useState(initialAuthValues)
   const [authBusy, setAuthBusy] = useState(false)
   const [error, setError] = useState("")
+  const [recipeError, setRecipeError] = useState("")
   const [authError, setAuthError] = useState("")
   const [categoryFilter, setCategoryFilter] = useState(ALL_CATEGORIES)
   const [expirySort, setExpirySort] = useState("soonest")
@@ -177,9 +183,43 @@ function App() {
     }
   }
 
+  async function fetchRecipeSuggestions() {
+    setIsRecipeLoading(true)
+    setRecipeError("")
+
+    try {
+      const payload = await requestJSON("/recipe-suggestions", {
+        method: "GET",
+        headers: {},
+      })
+      setRecipes(payload.recipes ?? [])
+      setRecipeIngredients(payload.ingredients ?? [])
+      setPriorityRecipeIngredients(payload.priority_ingredients ?? [])
+    } catch (requestError) {
+      if (requestError.status === 401) {
+        setUser(null)
+        setAuthMode("login")
+        setAuthError(
+          "Your session expired. Please sign in again to keep using FreshTracker.",
+        )
+        setRecipes([])
+        setRecipeIngredients([])
+        setPriorityRecipeIngredients([])
+      } else {
+        setRecipeError(requestError.message)
+      }
+    } finally {
+      setIsRecipeLoading(false)
+    }
+  }
+
   async function fetchDashboard() {
     setError("")
-    await Promise.all([fetchItems(), fetchWasteSummary()])
+    await Promise.all([
+      fetchItems(),
+      fetchWasteSummary(),
+      fetchRecipeSuggestions(),
+    ])
   }
 
   async function handleAuthSubmit(event) {
@@ -213,6 +253,9 @@ function App() {
       setUser(null)
       setItems([])
       setWasteCategories([])
+      setRecipes([])
+      setRecipeIngredients([])
+      setPriorityRecipeIngredients([])
       setAuthMode("login")
     } catch (requestError) {
       setError(requestError.message)
@@ -236,6 +279,7 @@ function App() {
       setItems((currentItems) =>
         mergeUpdatedItems(currentItems, payload.stacked_items ?? [payload.item]),
       )
+      void fetchRecipeSuggestions()
     } catch (requestError) {
       setError(requestError.message)
       throw requestError
@@ -257,6 +301,7 @@ function App() {
         body: JSON.stringify({ status }),
       })
       await fetchWasteSummary()
+      void fetchRecipeSuggestions()
     } catch (requestError) {
       setItems((currentItems) => mergeUpdatedItems(currentItems, [item]))
       setError(
@@ -592,6 +637,7 @@ function App() {
                   disabled={
                     isLoading ||
                     isWasteSummaryLoading ||
+                    isRecipeLoading ||
                     pendingItemActions.length > 0
                   }
                 >
@@ -611,12 +657,22 @@ function App() {
               </div>
             ) : null}
 
-            <Suspense fallback={<WasteRatioChartFallback />}>
-              <WasteRatioChart
-                categories={wasteCategories}
-                isLoading={isWasteSummaryLoading}
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] items-start gap-6">
+              <Suspense fallback={<WasteRatioChartFallback />}>
+                <WasteRatioChart
+                  categories={wasteCategories}
+                  isLoading={isWasteSummaryLoading}
+                />
+              </Suspense>
+              <RecipeSuggestions
+                recipes={recipes}
+                ingredients={recipeIngredients}
+                priorityIngredients={priorityRecipeIngredients}
+                isLoading={isRecipeLoading}
+                error={recipeError}
+                onRefresh={fetchRecipeSuggestions}
               />
-            </Suspense>
+            </div>
 
             <Card className="bg-harvest-paper">
               <CardContent className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] items-end gap-4 px-4 pb-4 pt-4">

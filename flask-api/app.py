@@ -608,36 +608,48 @@ def create_app(config=None):
         if error:
             return jsonify({"error": error}), 400
 
-        cache_key = recipe_ingredients_cache_key(normalized_ingredients)
-        cache = current_app.extensions["recipe_suggestion_cache"]
-        cached_recipes = cache.get_fresh(cache_key)
-        if cached_recipes is not None:
-            return recipe_suggestion_response(
-                normalized_ingredients,
-                cached_recipes,
-                source="cache",
-            )
-
         try:
-            recipes = fetch_recipe_suggestions(normalized_ingredients)
+            recipes, source = resolve_recipe_suggestions(
+                normalized_ingredients
+            )
         except RecipeProviderError as error:
-            stale_recipes = cache.get_stale(cache_key)
-            if stale_recipes is not None:
-                current_app.logger.warning(
-                    "Serving stale recipe suggestions after provider failure"
-                )
-                return recipe_suggestion_response(
-                    normalized_ingredients,
-                    stale_recipes,
-                    source="stale-cache",
-                )
             return jsonify({"error": str(error)}), error.status_code
 
-        cache.store(cache_key, recipes)
         return recipe_suggestion_response(
             normalized_ingredients,
             recipes,
-            source="spoonacular",
+            source=source,
+        )
+
+    @app.get("/recipe-suggestions")
+    @require_authentication
+    def inventory_recipe_suggestions():
+        ingredients, priority_ingredients = inventory_recipe_ingredients(
+            get_current_user().id,
+            today=date.today(),
+        )
+        if not ingredients:
+            return jsonify(
+                {
+                    "ingredients": [],
+                    "priority_ingredients": [],
+                    "recipes": [],
+                    "source": "inventory",
+                }
+            )
+
+        try:
+            recipes, source = resolve_recipe_suggestions(ingredients)
+        except RecipeProviderError as error:
+            return jsonify({"error": str(error)}), error.status_code
+
+        return jsonify(
+            {
+                "ingredients": list(ingredients),
+                "priority_ingredients": list(priority_ingredients),
+                "recipes": recipes,
+                "source": source,
+            }
         )
 
     @app.patch("/items/<int:item_id>")
@@ -711,10 +723,7 @@ def normalize_recipe_ingredients(data):
         if not isinstance(ingredient, str) or not ingredient.strip():
             return None, "each ingredient must be a non-empty string"
 
-        value = unicodedata.normalize(
-            "NFKC",
-            " ".join(ingredient.split()),
-        ).casefold()
+        value = normalize_recipe_ingredient_value(ingredient)
         if len(value) > MAX_RECIPE_INGREDIENT_LENGTH:
             return (
                 None,
@@ -728,9 +737,86 @@ def normalize_recipe_ingredients(data):
     return tuple(sorted(normalized)), None
 
 
+def normalize_recipe_ingredient_value(value):
+    return unicodedata.normalize(
+        "NFKC",
+        " ".join(value.split()),
+    ).casefold()
+
+
+def inventory_recipe_ingredients(user_id, today=None):
+    current_date = today or date.today()
+    items = (
+        InventoryItem.query.filter_by(user_id=user_id, status="active")
+        .order_by(InventoryItem.expiry_date.asc(), InventoryItem.id.asc())
+        .all()
+    )
+    priority_ingredients = []
+    active_ingredients = []
+    seen = set()
+
+    for item in items:
+        expiry_status = classify_expiry_date(
+            item.expiry_date,
+            today=current_date,
+        )
+        if expiry_status == "expired":
+            continue
+
+        ingredient = normalize_recipe_ingredient_value(item.name)
+        if (
+            not ingredient
+            or len(ingredient) > MAX_RECIPE_INGREDIENT_LENGTH
+            or "," in ingredient
+            or ingredient in seen
+        ):
+            continue
+
+        seen.add(ingredient)
+        if expiry_status == "expiring_soon":
+            priority_ingredients.append(ingredient)
+        else:
+            active_ingredients.append(ingredient)
+
+    ingredients = tuple(
+        (priority_ingredients + active_ingredients)[
+            :MAX_RECIPE_INGREDIENTS
+        ]
+    )
+    included_priority = tuple(
+        ingredient
+        for ingredient in priority_ingredients
+        if ingredient in ingredients
+    )
+    return ingredients, included_priority
+
+
 def recipe_ingredients_cache_key(ingredients):
-    canonical_value = "\x00".join(ingredients).encode("utf-8")
+    canonical_value = "\x00".join(sorted(ingredients)).encode("utf-8")
     return hashlib.sha256(canonical_value).hexdigest()
+
+
+def resolve_recipe_suggestions(ingredients):
+    cache_key = recipe_ingredients_cache_key(ingredients)
+    cache = current_app.extensions["recipe_suggestion_cache"]
+    cached_recipes = cache.get_fresh(cache_key)
+    if cached_recipes is not None:
+        return cached_recipes, "cache"
+
+    try:
+        recipes = fetch_recipe_suggestions(ingredients)
+    except RecipeProviderError:
+        stale_recipes = cache.get_stale(cache_key)
+        if stale_recipes is None:
+            raise
+
+        current_app.logger.warning(
+            "Serving stale recipe suggestions after provider failure"
+        )
+        return stale_recipes, "stale-cache"
+
+    cache.store(cache_key, recipes)
+    return recipes, "spoonacular"
 
 
 def fetch_recipe_suggestions(ingredients):
@@ -796,7 +882,13 @@ def fetch_recipe_suggestions(ingredients):
             502,
         ) from error
 
-    if not isinstance(recipes, list):
+    if not isinstance(recipes, list) or any(
+        not isinstance(recipe, dict)
+        or not isinstance(recipe.get("id"), int)
+        or not isinstance(recipe.get("title"), str)
+        or not recipe["title"].strip()
+        for recipe in recipes
+    ):
         raise RecipeProviderError(
             "recipe provider returned an invalid response",
             502,

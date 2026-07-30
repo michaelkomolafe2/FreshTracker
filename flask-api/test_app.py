@@ -108,6 +108,139 @@ def test_recipe_suggestions_require_authentication(client):
     assert response.get_json() == {"error": "authentication required"}
 
 
+def test_inventory_recipe_suggestions_require_authentication(client):
+    response = client.get("/recipe-suggestions")
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "authentication required"}
+
+
+def test_inventory_recipe_suggestions_skip_provider_for_empty_inventory(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.requests.get",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Spoonacular must not be called for empty inventory"
+        ),
+    )
+    register_user(client)
+
+    response = client.get("/recipe-suggestions")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ingredients": [],
+        "priority_ingredients": [],
+        "recipes": [],
+        "source": "inventory",
+    }
+
+
+def test_inventory_recipe_suggestions_prioritize_expiring_items(
+    app,
+    client,
+    monkeypatch,
+):
+    today = date.today()
+    calls = []
+    recipes = [
+        {
+            "id": 123,
+            "title": "Spinach and Milk Soup",
+            "usedIngredientCount": 2,
+            "missedIngredientCount": 1,
+        }
+    ]
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return StubSpoonacularResponse(recipes)
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+    register_user(client)
+
+    with app.app_context():
+        user = User.query.one()
+        item_specs = [
+            ("Expired yogurt", today - timedelta(days=1), "active"),
+            ("Spinach", today, "active"),
+            ("Milk", today + timedelta(days=7), "active"),
+            ("Rice", today + timedelta(days=8), "active"),
+            ("Milk", today + timedelta(days=10), "active"),
+            ("Bread", today, "used"),
+        ]
+        for name, expiry_date, status in item_specs:
+            db.session.add(
+                InventoryItem(
+                    user_id=user.id,
+                    name=name,
+                    stack_key=build_stack_key(name, "item", expiry_date),
+                    quantity=1,
+                    unit="item",
+                    expiry_date=expiry_date,
+                    status=status,
+                )
+            )
+        db.session.commit()
+
+    response = client.get("/recipe-suggestions")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ingredients": ["spinach", "milk", "rice"],
+        "priority_ingredients": ["spinach", "milk"],
+        "recipes": recipes,
+        "source": "spoonacular",
+    }
+    assert len(calls) == 1
+    assert calls[0][1]["params"]["ingredients"] == "spinach,milk,rice"
+    assert calls[0][1]["headers"] == {
+        "x-api-key": "test-spoonacular-key"
+    }
+
+
+def test_inventory_recipe_suggestions_use_cache(app, client, monkeypatch):
+    today = date.today()
+    calls = []
+    recipes = [{"id": 456, "title": "Tomato Pasta"}]
+
+    def fake_get(*_args, **_kwargs):
+        calls.append(True)
+        return StubSpoonacularResponse(recipes)
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+    register_user(client)
+    with app.app_context():
+        user = User.query.one()
+        db.session.add(
+            InventoryItem(
+                user_id=user.id,
+                name="Tomato",
+                stack_key=build_stack_key("Tomato", "item", today),
+                quantity=1,
+                unit="item",
+                expiry_date=today,
+                status="active",
+            )
+        )
+        db.session.commit()
+
+    first_response = client.get("/recipe-suggestions")
+    second_response = client.get("/recipe-suggestions")
+
+    assert first_response.get_json()["source"] == "spoonacular"
+    assert second_response.status_code == 200
+    assert second_response.get_json() == {
+        "ingredients": ["tomato"],
+        "priority_ingredients": ["tomato"],
+        "recipes": recipes,
+        "source": "cache",
+    }
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
@@ -329,6 +462,28 @@ def test_recipe_suggestions_reject_invalid_provider_json(
         lambda *_args, **_kwargs: StubSpoonacularResponse(
             {"recipes": []},
         ),
+    )
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == 502
+    assert response.get_json() == {
+        "error": "recipe provider returned an invalid response"
+    }
+
+
+def test_recipe_suggestions_reject_invalid_recipe_entries(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.requests.get",
+        lambda *_args, **_kwargs: StubSpoonacularResponse([None]),
     )
     register_user(client)
 
