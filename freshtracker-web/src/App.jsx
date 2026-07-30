@@ -1,13 +1,28 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react"
-import { AlertCircle, ClipboardList, LogOut, RefreshCcw } from "lucide-react"
+import {
+  AlertCircle,
+  ClipboardList,
+  LogOut,
+  RefreshCcw,
+  Search,
+} from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { ItemForm } from "@/components/ItemForm"
 import { ItemList } from "@/components/ItemList"
 
 const API_BASE = "/api"
+const ALL_CATEGORIES = "all"
+const UNCATEGORIZED = "uncategorized"
 const WasteRatioChart = lazy(() =>
   import("@/components/WasteRatioChart").then((module) => ({
     default: module.WasteRatioChart,
@@ -42,6 +57,15 @@ function mergeUpdatedItems(currentItems, changedItems) {
   )
 }
 
+function inventoryCategoryValue(item) {
+  const category = item.category?.trim()
+  return category ? `category:${category}` : UNCATEGORIZED
+}
+
+function inventoryCategoryLabel(value) {
+  return value === UNCATEGORIZED ? "Unsorted" : value.slice("category:".length)
+}
+
 function WasteRatioChartFallback() {
   return (
     <Card aria-label="Loading outcome chart">
@@ -69,6 +93,9 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [error, setError] = useState("")
   const [authError, setAuthError] = useState("")
+  const [categoryFilter, setCategoryFilter] = useState(ALL_CATEGORIES)
+  const [expirySort, setExpirySort] = useState("soonest")
+  const [itemQuery, setItemQuery] = useState("")
 
   async function requestJSON(path, options = {}) {
     const method = (options.method ?? "GET").toUpperCase()
@@ -257,13 +284,88 @@ function App() {
     })()
   }, [])
 
+  const categoryOptions = useMemo(
+    () =>
+      [...new Set(items.map(inventoryCategoryValue))].sort((left, right) => {
+        if (left === UNCATEGORIZED) {
+          return 1
+        }
+
+        if (right === UNCATEGORIZED) {
+          return -1
+        }
+
+        return inventoryCategoryLabel(left).localeCompare(
+          inventoryCategoryLabel(right),
+        )
+      }),
+    [items],
+  )
+
+  useEffect(() => {
+    if (
+      categoryFilter !== ALL_CATEGORIES &&
+      !categoryOptions.includes(categoryFilter)
+    ) {
+      setCategoryFilter(ALL_CATEGORIES)
+    }
+  }, [categoryFilter, categoryOptions])
+
+  const filteredAndSortedItems = useMemo(() => {
+    const normalizedQuery = itemQuery.trim().toLocaleLowerCase()
+    const matchingItems = items.filter((item) => {
+      const matchesCategory =
+        categoryFilter === ALL_CATEGORIES ||
+        inventoryCategoryValue(item) === categoryFilter
+      const matchesQuery =
+        normalizedQuery === "" ||
+        String(item.name).toLocaleLowerCase().includes(normalizedQuery)
+
+      return matchesCategory && matchesQuery
+    })
+
+    // Filtering is O(n) and sorting is O(n log n), which is fine for household
+    // inventories; a commercial/shared fridge with thousands needs server-side queries.
+    return [...matchingItems].sort((left, right) => {
+      const leftExpiry = left.expiry_date || ""
+      const rightExpiry = right.expiry_date || ""
+
+      if (!leftExpiry || !rightExpiry) {
+        if (!leftExpiry && !rightExpiry) {
+          return left.id - right.id
+        }
+
+        return leftExpiry ? -1 : 1
+      }
+
+      const dateComparison = leftExpiry.localeCompare(rightExpiry)
+      const directedComparison =
+        expirySort === "soonest" ? dateComparison : -dateComparison
+
+      return (
+        directedComparison ||
+        String(left.name).localeCompare(String(right.name)) ||
+        left.id - right.id
+      )
+    })
+  }, [items, categoryFilter, expirySort, itemQuery])
+
+  const hasInventoryFilters =
+    categoryFilter !== ALL_CATEGORIES || itemQuery.trim() !== ""
+  const hasCustomInventoryView =
+    hasInventoryFilters || expirySort !== "soonest"
+
   const itemCountLabel = useMemo(() => {
+    if (filteredAndSortedItems.length !== items.length) {
+      return `${filteredAndSortedItems.length} of ${items.length} items shown`
+    }
+
     if (items.length === 1) {
       return "1 item being watched"
     }
 
     return `${items.length} items being watched`
-  }, [items.length])
+  }, [filteredAndSortedItems.length, items.length])
 
   if (!user) {
     return (
@@ -516,10 +618,91 @@ function App() {
               />
             </Suspense>
 
+            <Card className="bg-harvest-paper">
+              <CardContent className="grid gap-4 px-4 pb-4 pt-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] xl:items-end">
+                <div className="space-y-2 md:col-span-2 xl:col-span-1">
+                  <label
+                    htmlFor="inventory-search"
+                    className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
+                  >
+                    Search items
+                  </label>
+                  <div className="relative">
+                    <Search
+                      className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-primary"
+                      aria-hidden="true"
+                    />
+                    <Input
+                      id="inventory-search"
+                      type="search"
+                      value={itemQuery}
+                      onChange={(event) => setItemQuery(event.target.value)}
+                      placeholder="Search by item name"
+                      className="bg-card pl-10"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    htmlFor="inventory-category"
+                    className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
+                  >
+                    Category
+                  </label>
+                  <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                    <SelectTrigger id="inventory-category" className="bg-card">
+                      <SelectValue placeholder="All categories" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={ALL_CATEGORIES}>All categories</SelectItem>
+                      {categoryOptions.map((category) => (
+                        <SelectItem key={category} value={category}>
+                          {inventoryCategoryLabel(category)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    htmlFor="inventory-sort"
+                    className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground"
+                  >
+                    Expiry date
+                  </label>
+                  <Select value={expirySort} onValueChange={setExpirySort}>
+                    <SelectTrigger id="inventory-sort" className="bg-card">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="soonest">Soonest first</SelectItem>
+                      <SelectItem value="latest">Latest first</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setCategoryFilter(ALL_CATEGORIES)
+                    setExpirySort("soonest")
+                    setItemQuery("")
+                  }}
+                  disabled={!hasCustomInventoryView}
+                >
+                  Reset
+                </Button>
+              </CardContent>
+            </Card>
+
             <ItemList
-              items={items}
+              items={filteredAndSortedItems}
               isLoading={isLoading}
               onUpdateStatus={updateItemStatus}
+              emptyState={hasInventoryFilters ? "filtered" : "inventory"}
             />
           </div>
         </section>

@@ -32,7 +32,12 @@ function expiryPresentation(expiryDate) {
   return { label: "Fresh", className: "border-emerald-300 bg-emerald-50 text-emerald-900" }
 }
 
-export function ItemList({ items, isLoading, onUpdateStatus }) {
+export function ItemList({
+  items,
+  isLoading,
+  onUpdateStatus,
+  emptyState = "inventory",
+}) {
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -54,11 +59,19 @@ export function ItemList({ items, isLoading, onUpdateStatus }) {
             <PackageOpen className="h-6 w-6" />
           </div>
           <h3 className="font-display text-3xl font-semibold text-foreground">
-            The shelves are quiet.
+            {emptyState === "filtered"
+              ? "Nothing matches that view."
+              : "The shelves are quiet."}
           </h3>
           <p className="mt-3 text-base leading-7 text-muted-foreground">
-            Add the first thing you unpacked. Milk, cilantro, yesterday&apos;s
-            very optimistic kale. We&apos;ll keep it tidy from there.
+            {emptyState === "filtered" ? (
+              "Try another item name or category, or reset the inventory filters."
+            ) : (
+              <>
+                Add the first thing you unpacked. Milk, cilantro, yesterday&apos;s
+                very optimistic kale. We&apos;ll keep it tidy from there.
+              </>
+            )}
           </p>
         </div>
       </div>
