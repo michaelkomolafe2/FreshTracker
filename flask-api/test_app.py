@@ -594,6 +594,89 @@ def test_waste_log_rejects_unsupported_action(app, client):
         db.session.rollback()
 
 
+def test_waste_log_category_summary_requires_authentication(client):
+    response = client.get("/waste-logs/category-summary")
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "authentication required"}
+
+
+def test_waste_log_category_summary_returns_empty_categories(client):
+    register_user(client)
+
+    response = client.get("/waste-logs/category-summary")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"categories": []}
+
+
+def test_waste_log_category_summary_groups_actions_and_scopes_to_user(app, client):
+    register_user(client)
+
+    with app.app_context():
+        current_user = User.query.filter_by(email="tester@example.com").one()
+        other_user = User(
+            email="other@example.com",
+            password_hash="not-used-by-this-test",
+        )
+        db.session.add(other_user)
+        db.session.flush()
+
+        log_specs = [
+            (current_user, "Milk", "Dairy", "used"),
+            (current_user, "Yogurt", "Dairy", "used"),
+            (current_user, "Cheese", "Dairy", "wasted"),
+            (current_user, "Bread", "Bakery", "wasted"),
+            (current_user, "Mystery item", None, "used"),
+            (other_user, "Other milk", "Dairy", "wasted"),
+        ]
+        for user, name, category, action in log_specs:
+            item = InventoryItem(
+                user_id=user.id,
+                name=name,
+                stack_key=build_stack_key(name, "item", date.today()),
+                category=category,
+                quantity=1,
+                unit="item",
+                expiry_date=date.today(),
+                status=action,
+            )
+            db.session.add(item)
+            db.session.flush()
+            db.session.add(
+                WasteLog(
+                    item_id=item.id,
+                    user_id=user.id,
+                    action=action,
+                    category=category,
+                )
+            )
+        db.session.commit()
+
+    response = client.get("/waste-logs/category-summary")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "categories": [
+            {
+                "category": None,
+                "used": 1,
+                "wasted": 0,
+            },
+            {
+                "category": "Bakery",
+                "used": 0,
+                "wasted": 1,
+            },
+            {
+                "category": "Dairy",
+                "used": 2,
+                "wasted": 1,
+            },
+        ]
+    }
+
+
 def test_create_item_predicts_missing_category(monkeypatch, client):
     monkeypatch.setattr("app.predict_category", lambda item_name: "Produce")
     register_user(client)

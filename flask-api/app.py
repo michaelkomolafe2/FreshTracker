@@ -541,6 +541,35 @@ def create_app(config=None):
 
         return jsonify({"items": [item.to_dict() for item in items]})
 
+    @app.get("/waste-logs/category-summary")
+    @require_authentication
+    def waste_log_category_summary():
+        rows = (
+            db.session.query(
+                WasteLog.category,
+                WasteLog.action,
+                db.func.count(WasteLog.id).label("count"),
+            )
+            .filter(WasteLog.user_id == get_current_user().id)
+            .group_by(WasteLog.category, WasteLog.action)
+            .order_by(WasteLog.category.asc(), WasteLog.action.asc())
+            .all()
+        )
+
+        categories = {}
+        for category, action, count in rows:
+            summary = categories.setdefault(
+                category,
+                {
+                    "category": category,
+                    "used": 0,
+                    "wasted": 0,
+                },
+            )
+            summary[action] = count
+
+        return jsonify({"categories": list(categories.values())})
+
     @app.post("/recipe-suggestions")
     @require_authentication
     def recipe_suggestions():

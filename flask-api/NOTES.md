@@ -68,3 +68,21 @@ The Compose API currently runs two Gunicorn workers. Each worker therefore has
 an independent cache, which can duplicate upstream calls and yield different
 eviction times. Move these entries to Redis before scaling beyond one process
 or instance if shared cache behavior and quota efficiency are required.
+
+# Waste outcome category analytics
+
+`GET /waste-logs/category-summary` returns the authenticated user's used and
+wasted event counts per category. The endpoint executes one aggregate query
+grouped by `waste_logs.category` and `waste_logs.action`, then pivots those rows
+into `{category, used, wasted}` JSON objects. Categories remain nullable so
+uncategorized logs are not conflated with a user-entered category named
+`Unsorted`.
+
+The category on each waste log is the event-time snapshot copied from its
+inventory item. Inventory items use the trained grocery model only when the
+client does not supply a category; an explicit category remains authoritative.
+
+The React chart derives percentages from the raw counts with `useMemo` and
+renders a 100% stacked bar for each category. These percentages describe logged
+item outcomes, not food quantity or weight. Quantity-based waste analytics
+would require the log to snapshot quantity and a normalized unit.

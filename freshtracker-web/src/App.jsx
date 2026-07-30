@@ -1,12 +1,18 @@
-import { useEffect, useMemo, useState } from "react"
+import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import { AlertCircle, ClipboardList, LogOut, RefreshCcw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { ItemForm } from "@/components/ItemForm"
 import { ItemList } from "@/components/ItemList"
 
 const API_BASE = "/api"
+const WasteRatioChart = lazy(() =>
+  import("@/components/WasteRatioChart").then((module) => ({
+    default: module.WasteRatioChart,
+  })),
+)
 
 const initialAuthValues = {
   email: "",
@@ -36,10 +42,26 @@ function mergeUpdatedItems(currentItems, changedItems) {
   )
 }
 
+function WasteRatioChartFallback() {
+  return (
+    <Card aria-label="Loading outcome chart">
+      <CardHeader>
+        <div className="h-3 w-32 animate-pulse rounded bg-harvest-oat" />
+        <div className="h-8 w-64 max-w-full animate-pulse rounded bg-harvest-oat/70" />
+      </CardHeader>
+      <CardContent>
+        <div className="h-64 animate-pulse rounded-md bg-harvest-oat/60" />
+      </CardContent>
+    </Card>
+  )
+}
+
 function App() {
   const [user, setUser] = useState(null)
   const [items, setItems] = useState([])
+  const [wasteCategories, setWasteCategories] = useState([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isWasteSummaryLoading, setIsWasteSummaryLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
   const [pendingItemActions, setPendingItemActions] = useState([])
   const [authMode, setAuthMode] = useState("login")
@@ -105,6 +127,34 @@ function App() {
     }
   }
 
+  async function fetchWasteSummary() {
+    setIsWasteSummaryLoading(true)
+
+    try {
+      const payload = await requestJSON("/waste-logs/category-summary", {
+        method: "GET",
+        headers: {},
+      })
+      setWasteCategories(payload.categories ?? [])
+    } catch (requestError) {
+      if (requestError.status === 401) {
+        setUser(null)
+        setAuthMode("login")
+        setAuthError("Your session expired. Please sign in again to keep using FreshTracker.")
+        setWasteCategories([])
+      } else {
+        setError(requestError.message)
+      }
+    } finally {
+      setIsWasteSummaryLoading(false)
+    }
+  }
+
+  async function fetchDashboard() {
+    setError("")
+    await Promise.all([fetchItems(), fetchWasteSummary()])
+  }
+
   async function handleAuthSubmit(event) {
     event.preventDefault()
     setAuthBusy(true)
@@ -119,7 +169,7 @@ function App() {
 
       setUser(payload.user)
       setAuthValues(initialAuthValues)
-      await fetchItems()
+      await fetchDashboard()
     } catch (requestError) {
       setAuthError(requestError.message)
     } finally {
@@ -135,6 +185,7 @@ function App() {
       await requestJSON("/auth/logout", { method: "POST", body: JSON.stringify({}) })
       setUser(null)
       setItems([])
+      setWasteCategories([])
       setAuthMode("login")
     } catch (requestError) {
       setError(requestError.message)
@@ -178,6 +229,7 @@ function App() {
         method: "PATCH",
         body: JSON.stringify({ status }),
       })
+      await fetchWasteSummary()
     } catch (requestError) {
       setItems((currentItems) => mergeUpdatedItems(currentItems, [item]))
       setError(
@@ -195,7 +247,7 @@ function App() {
       try {
         const sessionUser = await fetchSession()
         if (sessionUser) {
-          await fetchItems()
+          await fetchDashboard()
         }
       } catch {
         setUser(null)
@@ -434,8 +486,12 @@ function App() {
                   type="button"
                   variant="secondary"
                   className="justify-start"
-                  onClick={fetchItems}
-                  disabled={isLoading || pendingItemActions.length > 0}
+                  onClick={fetchDashboard}
+                  disabled={
+                    isLoading ||
+                    isWasteSummaryLoading ||
+                    pendingItemActions.length > 0
+                  }
                 >
                   <RefreshCcw className="h-4 w-4" />
                   Refresh
@@ -452,6 +508,13 @@ function App() {
                 </div>
               </div>
             ) : null}
+
+            <Suspense fallback={<WasteRatioChartFallback />}>
+              <WasteRatioChart
+                categories={wasteCategories}
+                isLoading={isWasteSummaryLoading}
+              />
+            </Suspense>
 
             <ItemList
               items={items}
