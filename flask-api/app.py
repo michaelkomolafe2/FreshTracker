@@ -55,6 +55,7 @@ RECIPE_RESULT_LIMIT = 10
 RECIPE_CACHE_MAX_SIZE = 256
 RECIPE_CACHE_TTL_SECONDS = 6 * 60 * 60
 RECIPE_STALE_TTL_SECONDS = 24 * 60 * 60
+EXPIRING_SOON_DAYS = 7
 SPOONACULAR_RECIPES_URL = (
     "https://api.spoonacular.com/recipes/findByIngredients"
 )
@@ -152,7 +153,10 @@ class InventoryItem(db.Model):
         ),
     )
 
-    def to_dict(self):
+    def to_dict(self, today=None):
+        current_date = today or date.today()
+        days_until_expiry = (self.expiry_date - current_date).days
+
         return {
             "id": self.id,
             "name": self.name,
@@ -160,6 +164,11 @@ class InventoryItem(db.Model):
             "quantity": self.quantity,
             "unit": self.unit,
             "expiry_date": self.expiry_date.isoformat(),
+            "days_until_expiry": days_until_expiry,
+            "expiry_status": classify_expiry_date(
+                self.expiry_date,
+                today=current_date,
+            ),
             "status": self.status,
         }
 
@@ -232,6 +241,15 @@ def build_stack_key(name, unit, expiry_date):
     """Create a stable value identifier for items that can share a stack."""
     parts = (name.strip().casefold(), unit.strip().casefold(), expiry_date.isoformat())
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+def classify_expiry_date(expiry_date, today=None):
+    days_until_expiry = (expiry_date - (today or date.today())).days
+    if days_until_expiry < 0:
+        return "expired"
+    if days_until_expiry <= EXPIRING_SOON_DAYS:
+        return "expiring_soon"
+    return "active"
 
 
 def matching_active_stacks(user_id, stack_key):
@@ -523,23 +541,35 @@ def create_app(config=None):
         )
         db.session.commit()
         primary_item = affected_items[0]
+        current_date = date.today()
 
-        payload = {"item": primary_item.to_dict()}
+        payload = {"item": primary_item.to_dict(today=current_date)}
         if len(affected_items) > 1:
-            payload["stacked_items"] = [item.to_dict() for item in affected_items]
+            payload["stacked_items"] = [
+                item.to_dict(today=current_date)
+                for item in affected_items
+            ]
 
         return jsonify(payload), 201
 
     @app.get("/items")
     @require_authentication
     def list_items():
+        current_date = date.today()
         items = (
             InventoryItem.query.filter_by(user_id=get_current_user().id, status="active")
             .order_by(InventoryItem.expiry_date.asc(), InventoryItem.id.asc())
             .all()
         )
 
-        return jsonify({"items": [item.to_dict() for item in items]})
+        return jsonify(
+            {
+                "items": [
+                    item.to_dict(today=current_date)
+                    for item in items
+                ]
+            }
+        )
 
     @app.get("/waste-logs/category-summary")
     @require_authentication

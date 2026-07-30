@@ -10,6 +10,7 @@ from app import (
     User,
     WasteLog,
     build_stack_key,
+    classify_expiry_date,
     create_app,
     db,
     mail,
@@ -17,6 +18,21 @@ from app import (
     recipe_ingredients_cache_key,
     send_expiry_alerts,
 )
+
+
+def expected_expiry_fields(expiry_date):
+    days_until_expiry = (date.fromisoformat(expiry_date) - date.today()).days
+    if days_until_expiry < 0:
+        expiry_status = "expired"
+    elif days_until_expiry <= 7:
+        expiry_status = "expiring_soon"
+    else:
+        expiry_status = "active"
+
+    return {
+        "days_until_expiry": days_until_expiry,
+        "expiry_status": expiry_status,
+    }
 
 
 @pytest.fixture()
@@ -406,8 +422,30 @@ def test_create_item_returns_created_item(client):
         "quantity": 1.5,
         "unit": "liters",
         "expiry_date": "2026-07-01",
+        **expected_expiry_fields("2026-07-01"),
         "status": "active",
     }
+
+
+@pytest.mark.parametrize(
+    ("days_until_expiry", "expected_status"),
+    [
+        (-1, "expired"),
+        (0, "expiring_soon"),
+        (7, "expiring_soon"),
+        (8, "active"),
+    ],
+)
+def test_classify_expiry_date_uses_strict_boundaries(
+    days_until_expiry,
+    expected_status,
+):
+    today = date(2026, 7, 30)
+
+    assert classify_expiry_date(
+        today + timedelta(days=days_until_expiry),
+        today=today,
+    ) == expected_status
 
 
 def test_new_inventory_item_defaults_alert_sent_to_false(app, client):
@@ -695,6 +733,8 @@ def test_create_item_predicts_missing_category(monkeypatch, client):
         "quantity": 1.0,
         "unit": "item",
         "expiry_date": date.today().isoformat(),
+        "days_until_expiry": 0,
+        "expiry_status": "expiring_soon",
         "status": "active",
     }
 
@@ -734,6 +774,7 @@ def test_create_item_stacks_matching_items(monkeypatch, client):
         "quantity": 5.0,
         "unit": "bag",
         "expiry_date": "2026-07-02",
+        **expected_expiry_fields("2026-07-02"),
         "status": "active",
     }
 
@@ -748,6 +789,7 @@ def test_create_item_stacks_matching_items(monkeypatch, client):
             "quantity": 5.0,
             "unit": "bag",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         }
     ]
@@ -788,6 +830,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
         "quantity": 10.0,
         "unit": "box",
         "expiry_date": "2026-07-02",
+        **expected_expiry_fields("2026-07-02"),
         "status": "active",
     }
     assert second_response.get_json()["stacked_items"] == [
@@ -798,6 +841,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
             "quantity": 10.0,
             "unit": "box",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         },
         {
@@ -807,6 +851,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
             "quantity": 3.0,
             "unit": "box",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         },
     ]
@@ -822,6 +867,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
             "quantity": 10.0,
             "unit": "box",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         },
         {
@@ -831,6 +877,7 @@ def test_create_item_spills_overflow_into_new_stack(monkeypatch, client):
             "quantity": 3.0,
             "unit": "box",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         },
     ]
@@ -902,6 +949,7 @@ def test_list_items_only_returns_active_items(monkeypatch, client):
             "quantity": 1.0,
             "unit": "bag",
             "expiry_date": "2026-07-02",
+            **expected_expiry_fields("2026-07-02"),
             "status": "active",
         }
     ]

@@ -73,6 +73,7 @@ export function ItemForm({ onAddItem, isAdding }) {
         name: trimmedName,
         quantity,
         unit: formValues.unit,
+        expiry_date: formValues.expiry_date,
       })
       setFormValues(initialValues())
     } catch {

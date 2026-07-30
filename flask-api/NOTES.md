@@ -86,3 +86,15 @@ The React chart derives percentages from the raw counts with `useMemo` and
 renders a 100% stacked bar for each category. These percentages describe logged
 item outcomes, not food quantity or weight. Quantity-based waste analytics
 would require the log to snapshot quantity and a normalized unit.
+
+# Expiry state
+
+Inventory responses include `days_until_expiry` and `expiry_status`. The status
+is `expired` for negative day counts, `expiring_soon` for zero through seven
+days inclusive, and `active` above seven days.
+
+These values are computed from the non-null indexed `expiry_date` when a
+response is serialized. They are intentionally not stored: persisted expiry
+states would become incorrect at midnight and would require a scheduled data
+rewrite. A single current date is reused while serializing each response so
+every item in that payload uses the same boundary.
