@@ -49,3 +49,22 @@ from producing duplicate logs.
 The inventory list removes an item optimistically when either action is
 selected. If the request fails, the original item is merged back into the list
 in expiry order and the API error is shown.
+
+# Recipe suggestions
+
+`POST /recipe-suggestions` accepts an authenticated JSON request shaped like
+`{"ingredients": ["milk", "spinach"]}`. Ingredient names are Unicode-normalized,
+trimmed, case-folded, deduplicated, and sorted before the list is hashed. The
+endpoint sends the Spoonacular key in the `x-api-key` header and never returns
+or logs it.
+
+Set `SPOONACULAR_API_KEY` in the root `.env` file used by Compose. Successful
+responses are cached in-process for six hours, with a bounded 24-hour stale
+copy used only when Spoonacular times out, fails, or rejects a request because
+of quota or rate limiting. The `source` response field is `spoonacular`,
+`cache`, or `stale-cache`.
+
+The Compose API currently runs two Gunicorn workers. Each worker therefore has
+an independent cache, which can duplicate upstream calls and yield different
+eviction times. Move these entries to Redis before scaling beyond one process
+or instance if shared cache behavior and quota efficiency are required.

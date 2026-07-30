@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import pytest
+import requests
 from sqlalchemy.exc import StatementError
 
 from app import (
@@ -13,6 +14,7 @@ from app import (
     db,
     mail,
     now_utc,
+    recipe_ingredients_cache_key,
     send_expiry_alerts,
 )
 
@@ -25,6 +27,7 @@ def app():
             "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
             "MAIL_ENABLED": False,
             "MAIL_SUPPRESS_SEND": True,
+            "SPOONACULAR_API_KEY": "test-spoonacular-key",
         }
     )
 
@@ -58,6 +61,16 @@ def csrf_headers(client):
     return {"X-CSRF-Token": csrf_cookie.value}
 
 
+class StubSpoonacularResponse:
+    def __init__(self, payload, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+
+    def json(self):
+        return self.payload
+
+
 def test_health_returns_ok_status(client):
     response = client.get("/health")
 
@@ -67,6 +80,271 @@ def test_health_returns_ok_status(client):
         "default-src 'none'; base-uri 'none'; form-action 'none'; "
         "frame-ancestors 'none';"
     )
+
+
+def test_recipe_suggestions_require_authentication(client):
+    response = client.post(
+        "/recipe-suggestions",
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "authentication required"}
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "missing required field(s): ingredients"),
+        ({"ingredients": "milk"}, "ingredients must be a list"),
+        ({"ingredients": []}, "ingredients must contain at least one item"),
+        (
+            {"ingredients": ["milk", ""]},
+            "each ingredient must be a non-empty string",
+        ),
+        (
+            {"ingredients": ["tomatoes, chopped"]},
+            "ingredients must not contain commas",
+        ),
+        (
+            {"ingredients": [f"ingredient-{index}" for index in range(26)]},
+            "ingredients must contain at most 25 items",
+        ),
+    ],
+)
+def test_recipe_suggestions_reject_invalid_ingredients(
+    client,
+    payload,
+    message,
+):
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": message}
+
+
+def test_recipe_suggestions_call_spoonacular_with_normalized_ingredients(
+    client,
+    monkeypatch,
+):
+    calls = []
+    recipes = [
+        {
+            "id": 123,
+            "title": "Tomato Spinach Pasta",
+            "usedIngredientCount": 2,
+            "missedIngredientCount": 1,
+        }
+    ]
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return StubSpoonacularResponse(recipes)
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": [" Spinach ", "TOMATO", "spinach"]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ingredients": ["spinach", "tomato"],
+        "recipes": recipes,
+        "source": "spoonacular",
+    }
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == "https://api.spoonacular.com/recipes/findByIngredients"
+    assert kwargs["headers"] == {"x-api-key": "test-spoonacular-key"}
+    assert kwargs["params"] == {
+        "ingredients": "spinach,tomato",
+        "number": 10,
+        "ranking": 1,
+        "ignorePantry": "true",
+    }
+    assert kwargs["timeout"] == 8
+
+
+def test_equivalent_recipe_requests_share_cache(client, monkeypatch):
+    calls = []
+    recipes = [{"id": 456, "title": "Tomato Omelette"}]
+
+    def fake_get(*_args, **_kwargs):
+        calls.append(True)
+        return StubSpoonacularResponse(recipes)
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+    register_user(client)
+    headers = csrf_headers(client)
+
+    first_response = client.post(
+        "/recipe-suggestions",
+        headers=headers,
+        json={"ingredients": ["Egg", "tomato"]},
+    )
+    second_response = client.post(
+        "/recipe-suggestions",
+        headers=headers,
+        json={"ingredients": [" TOMATO ", "egg", "EGG"]},
+    )
+
+    assert first_response.get_json()["source"] == "spoonacular"
+    assert second_response.status_code == 200
+    assert second_response.get_json() == {
+        "ingredients": ["egg", "tomato"],
+        "recipes": recipes,
+        "source": "cache",
+    }
+    assert len(calls) == 1
+
+
+def test_recipe_suggestions_serve_stale_cache_on_rate_limit(
+    app,
+    client,
+    monkeypatch,
+):
+    recipes = [{"id": 789, "title": "Spinach Soup"}]
+    responses = [
+        StubSpoonacularResponse(recipes),
+        StubSpoonacularResponse({"message": "rate limited"}, status_code=429),
+    ]
+    monkeypatch.setattr(
+        "app.requests.get",
+        lambda *_args, **_kwargs: responses.pop(0),
+    )
+    register_user(client)
+    headers = csrf_headers(client)
+    payload = {"ingredients": ["spinach"]}
+
+    first_response = client.post(
+        "/recipe-suggestions",
+        headers=headers,
+        json=payload,
+    )
+    cache_key = recipe_ingredients_cache_key(("spinach",))
+    cache = app.extensions["recipe_suggestion_cache"]
+    with cache.lock:
+        cache.fresh.pop(cache_key)
+
+    stale_response = client.post(
+        "/recipe-suggestions",
+        headers=headers,
+        json=payload,
+    )
+
+    assert first_response.status_code == 200
+    assert stale_response.status_code == 200
+    assert stale_response.get_json() == {
+        "ingredients": ["spinach"],
+        "recipes": recipes,
+        "source": "stale-cache",
+    }
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_status", "message"),
+    [
+        (402, 503, "recipe provider rate limit reached"),
+        (429, 503, "recipe provider rate limit reached"),
+        (500, 502, "recipe provider temporarily unavailable"),
+    ],
+)
+def test_recipe_suggestions_return_clean_provider_errors(
+    client,
+    monkeypatch,
+    status_code,
+    expected_status,
+    message,
+):
+    monkeypatch.setattr(
+        "app.requests.get",
+        lambda *_args, **_kwargs: StubSpoonacularResponse(
+            {"message": "upstream details"},
+            status_code=status_code,
+        ),
+    )
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == expected_status
+    assert response.get_json() == {"error": message}
+
+
+def test_recipe_suggestions_return_clean_timeout_error(client, monkeypatch):
+    def raise_timeout(*_args, **_kwargs):
+        raise requests.Timeout("upstream timed out")
+
+    monkeypatch.setattr("app.requests.get", raise_timeout)
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": "recipe provider temporarily unavailable"
+    }
+
+
+def test_recipe_suggestions_reject_invalid_provider_json(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.requests.get",
+        lambda *_args, **_kwargs: StubSpoonacularResponse(
+            {"recipes": []},
+        ),
+    )
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == 502
+    assert response.get_json() == {
+        "error": "recipe provider returned an invalid response"
+    }
+
+
+def test_recipe_suggestions_return_clean_error_when_api_key_is_missing(
+    app,
+    client,
+):
+    app.config["SPOONACULAR_API_KEY"] = ""
+    register_user(client)
+
+    response = client.post(
+        "/recipe-suggestions",
+        headers=csrf_headers(client),
+        json={"ingredients": ["milk"]},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": "recipe suggestions are not configured"
+    }
 
 
 def test_unknown_api_route_returns_json_error(client):

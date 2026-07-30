@@ -1,18 +1,23 @@
+import copy
 import hashlib
 import hmac
 import json
 import logging
 import os
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 from secrets import token_urlsafe
+from threading import RLock
 from zoneinfo import ZoneInfo
 
 import click
 import joblib
+import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
+from cachetools import TTLCache
 from flask import Flask, current_app, g, jsonify, request
 from flask_mail import Mail, Message
 from flask_migrate import Migrate
@@ -44,6 +49,15 @@ CSRF_COOKIE_NAME = "freshtracker_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 SESSION_IDLE_MINUTES = 30
 SESSION_ABSOLUTE_HOURS = 24
+MAX_RECIPE_INGREDIENTS = 25
+MAX_RECIPE_INGREDIENT_LENGTH = 120
+RECIPE_RESULT_LIMIT = 10
+RECIPE_CACHE_MAX_SIZE = 256
+RECIPE_CACHE_TTL_SECONDS = 6 * 60 * 60
+RECIPE_STALE_TTL_SECONDS = 24 * 60 * 60
+SPOONACULAR_RECIPES_URL = (
+    "https://api.spoonacular.com/recipes/findByIngredients"
+)
 ALLOWED_ORIGINS = {
     origin.strip()
     for origin in os.environ.get(
@@ -52,6 +66,42 @@ ALLOWED_ORIGINS = {
     ).split(",")
     if origin.strip()
 }
+
+
+class RecipeProviderError(Exception):
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class RecipeSuggestionCache:
+    def __init__(self):
+        # Six hours preserves quota because a fixed ingredient set is unlikely
+        # to produce meaningfully different recipes within the same day.
+        self.fresh = TTLCache(
+            maxsize=RECIPE_CACHE_MAX_SIZE,
+            ttl=RECIPE_CACHE_TTL_SECONDS,
+        )
+        self.stale = TTLCache(
+            maxsize=RECIPE_CACHE_MAX_SIZE,
+            ttl=RECIPE_STALE_TTL_SECONDS,
+        )
+        self.lock = RLock()
+
+    def get_fresh(self, key):
+        with self.lock:
+            value = self.fresh.get(key)
+            return copy.deepcopy(value) if value is not None else None
+
+    def get_stale(self, key):
+        with self.lock:
+            value = self.stale.get(key)
+            return copy.deepcopy(value) if value is not None else None
+
+    def store(self, key, value):
+        with self.lock:
+            self.fresh[key] = copy.deepcopy(value)
+            self.stale[key] = copy.deepcopy(value)
 
 
 class InventoryItem(db.Model):
@@ -265,6 +315,13 @@ def create_app(config=None):
     app.config["EXPIRY_ALERT_MINUTE"] = int(
         os.environ.get("EXPIRY_ALERT_MINUTE", "0")
     )
+    app.config["SPOONACULAR_API_KEY"] = os.environ.get(
+        "SPOONACULAR_API_KEY",
+        "",
+    )
+    app.config["SPOONACULAR_TIMEOUT_SECONDS"] = float(
+        os.environ.get("SPOONACULAR_TIMEOUT_SECONDS", "8")
+    )
 
     app.config.update(provided_config)
     if "MAIL_SUPPRESS_SEND" not in provided_config:
@@ -279,10 +336,12 @@ def create_app(config=None):
 
     validate_mail_config(app.config)
     validate_expiry_alert_config(app.config)
+    validate_spoonacular_config(app.config)
 
     db.init_app(app)
     migrate.init_app(app, db)
     mail.init_app(app)
+    app.extensions["recipe_suggestion_cache"] = RecipeSuggestionCache()
     app.cli.add_command(run_expiry_alert_scheduler)
     app.cli.add_command(send_expiry_alerts_once)
 
@@ -482,6 +541,46 @@ def create_app(config=None):
 
         return jsonify({"items": [item.to_dict() for item in items]})
 
+    @app.post("/recipe-suggestions")
+    @require_authentication
+    def recipe_suggestions():
+        data = request.get_json(silent=True)
+        normalized_ingredients, error = normalize_recipe_ingredients(data)
+        if error:
+            return jsonify({"error": error}), 400
+
+        cache_key = recipe_ingredients_cache_key(normalized_ingredients)
+        cache = current_app.extensions["recipe_suggestion_cache"]
+        cached_recipes = cache.get_fresh(cache_key)
+        if cached_recipes is not None:
+            return recipe_suggestion_response(
+                normalized_ingredients,
+                cached_recipes,
+                source="cache",
+            )
+
+        try:
+            recipes = fetch_recipe_suggestions(normalized_ingredients)
+        except RecipeProviderError as error:
+            stale_recipes = cache.get_stale(cache_key)
+            if stale_recipes is not None:
+                current_app.logger.warning(
+                    "Serving stale recipe suggestions after provider failure"
+                )
+                return recipe_suggestion_response(
+                    normalized_ingredients,
+                    stale_recipes,
+                    source="stale-cache",
+                )
+            return jsonify({"error": str(error)}), error.status_code
+
+        cache.store(cache_key, recipes)
+        return recipe_suggestion_response(
+            normalized_ingredients,
+            recipes,
+            source="spoonacular",
+        )
+
     @app.patch("/items/<int:item_id>")
     @require_authentication
     def update_item_status(item_id):
@@ -533,6 +632,130 @@ def normalize_email(email):
     return email.strip().casefold()
 
 
+def normalize_recipe_ingredients(data):
+    if not isinstance(data, dict) or "ingredients" not in data:
+        return None, "missing required field(s): ingredients"
+
+    ingredients = data["ingredients"]
+    if not isinstance(ingredients, list):
+        return None, "ingredients must be a list"
+    if not ingredients:
+        return None, "ingredients must contain at least one item"
+    if len(ingredients) > MAX_RECIPE_INGREDIENTS:
+        return (
+            None,
+            f"ingredients must contain at most {MAX_RECIPE_INGREDIENTS} items",
+        )
+
+    normalized = set()
+    for ingredient in ingredients:
+        if not isinstance(ingredient, str) or not ingredient.strip():
+            return None, "each ingredient must be a non-empty string"
+
+        value = unicodedata.normalize(
+            "NFKC",
+            " ".join(ingredient.split()),
+        ).casefold()
+        if len(value) > MAX_RECIPE_INGREDIENT_LENGTH:
+            return (
+                None,
+                "each ingredient must be at most "
+                f"{MAX_RECIPE_INGREDIENT_LENGTH} characters",
+            )
+        if "," in value:
+            return None, "ingredients must not contain commas"
+        normalized.add(value)
+
+    return tuple(sorted(normalized)), None
+
+
+def recipe_ingredients_cache_key(ingredients):
+    canonical_value = "\x00".join(ingredients).encode("utf-8")
+    return hashlib.sha256(canonical_value).hexdigest()
+
+
+def fetch_recipe_suggestions(ingredients):
+    api_key = current_app.config.get("SPOONACULAR_API_KEY")
+    if not api_key:
+        raise RecipeProviderError(
+            "recipe suggestions are not configured",
+            503,
+        )
+
+    try:
+        response = requests.get(
+            SPOONACULAR_RECIPES_URL,
+            headers={"x-api-key": api_key},
+            params={
+                "ingredients": ",".join(ingredients),
+                "number": RECIPE_RESULT_LIMIT,
+                "ranking": 1,
+                "ignorePantry": "true",
+            },
+            timeout=current_app.config["SPOONACULAR_TIMEOUT_SECONDS"],
+        )
+    except requests.Timeout as error:
+        current_app.logger.warning("Spoonacular request timed out")
+        raise RecipeProviderError(
+            "recipe provider temporarily unavailable",
+            503,
+        ) from error
+    except requests.RequestException as error:
+        current_app.logger.warning(
+            "Spoonacular request failed: %s",
+            type(error).__name__,
+        )
+        raise RecipeProviderError(
+            "recipe provider temporarily unavailable",
+            503,
+        ) from error
+
+    if response.status_code in {402, 429}:
+        current_app.logger.warning(
+            "Spoonacular quota or rate limit reached: status=%s",
+            response.status_code,
+        )
+        raise RecipeProviderError(
+            "recipe provider rate limit reached",
+            503,
+        )
+    if not response.ok:
+        current_app.logger.warning(
+            "Spoonacular returned an error: status=%s",
+            response.status_code,
+        )
+        raise RecipeProviderError(
+            "recipe provider temporarily unavailable",
+            502,
+        )
+
+    try:
+        recipes = response.json()
+    except ValueError as error:
+        raise RecipeProviderError(
+            "recipe provider returned an invalid response",
+            502,
+        ) from error
+
+    if not isinstance(recipes, list):
+        raise RecipeProviderError(
+            "recipe provider returned an invalid response",
+            502,
+        )
+
+    return recipes
+
+
+def recipe_suggestion_response(ingredients, recipes, source):
+    return jsonify(
+        {
+            "ingredients": list(ingredients),
+            "recipes": recipes,
+            "source": source,
+        }
+    )
+
+
 def env_flag(name, default=False):
     value = os.environ.get(name)
     if value is None:
@@ -562,6 +785,11 @@ def validate_expiry_alert_config(config):
         raise ValueError("EXPIRY_ALERT_HOUR must be between 0 and 23")
     if not 0 <= config["EXPIRY_ALERT_MINUTE"] <= 59:
         raise ValueError("EXPIRY_ALERT_MINUTE must be between 0 and 59")
+
+
+def validate_spoonacular_config(config):
+    if config["SPOONACULAR_TIMEOUT_SECONDS"] <= 0:
+        raise ValueError("SPOONACULAR_TIMEOUT_SECONDS must be greater than 0")
 
 
 def alert_calendar_date():
