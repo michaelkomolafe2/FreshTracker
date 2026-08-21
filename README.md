@@ -187,3 +187,18 @@ Core API areas:
 - Add benchmark results for inventory and expiry-alert queries
 - Expand model evaluation with dataset size, accuracy, and known failure cases
 
+## Screenshots
+
+<img width="1238" height="589" alt="image" src="https://github.com/user-attachments/assets/d9e18439-bbce-4999-907c-548e60a7a20a" />
+<img width="324" height="648" alt="image" src="https://github.com/user-attachments/assets/3e0da335-b7b1-4143-9f6b-7324dc55e173" />
+<img width="920" height="679" alt="image" src="https://github.com/user-attachments/assets/01de21cf-3c0d-4d85-9104-74b724fbf811" />
+<img width="880" height="442" alt="image" src="https://github.com/user-attachments/assets/5212ce42-b4d3-4b7c-956d-d0c0855551d8" />
+<img width="903" height="577" alt="image" src="https://github.com/user-attachments/assets/ecb42512-917c-4321-aff1-c307633f26e4" />
+<img width="419" height="757" alt="image" src="https://github.com/user-attachments/assets/d9048b85-2816-48c4-8029-d932be988309" />
+
+
+
+
+
+
+
