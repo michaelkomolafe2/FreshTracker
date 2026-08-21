@@ -1,5 +1,7 @@
 # FreshTracker
 
+![CI](https://github.com/michaelkomolafe2/FreshTracker/actions/workflows/ci.yml/badge.svg)
+
 FreshTracker is a full-stack food waste tracking platform that helps users manage grocery inventory, track expiry dates, log waste outcomes, and receive recipe suggestions based on ingredients that are close to expiring.
 
 ## Architecture
