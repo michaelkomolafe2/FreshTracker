@@ -19,6 +19,7 @@ from app import (
     classify_expiry_date,
     create_app,
     db,
+    ensure_utc,
     mail,
     now_utc,
     recipe_ingredients_cache_key,
@@ -1382,6 +1383,38 @@ def test_session_idle_expiry_blocks_inventory_access(app, client):
 
     assert response.status_code == 401
     assert response.get_json() == {"error": "authentication required"}
+
+
+def test_successful_request_does_not_refresh_recent_session(app, client):
+    register_user(client)
+
+    with app.app_context():
+        session = Session.query.one()
+        original_last_seen_at = now_utc() - timedelta(minutes=1)
+        session.last_seen_at = original_last_seen_at
+        db.session.commit()
+
+    response = client.get("/items")
+
+    assert response.status_code == 200
+    with app.app_context():
+        assert ensure_utc(Session.query.one().last_seen_at) == original_last_seen_at
+
+
+def test_successful_request_refreshes_stale_session(app, client):
+    register_user(client)
+
+    with app.app_context():
+        session = Session.query.one()
+        original_last_seen_at = now_utc() - timedelta(minutes=6)
+        session.last_seen_at = original_last_seen_at
+        db.session.commit()
+
+    response = client.get("/items")
+
+    assert response.status_code == 200
+    with app.app_context():
+        assert ensure_utc(Session.query.one().last_seen_at) > original_last_seen_at
 
 
 def test_new_login_revokes_an_existing_session(app):

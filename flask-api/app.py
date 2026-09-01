@@ -52,6 +52,7 @@ CSRF_COOKIE_NAME = "freshtracker_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 SESSION_IDLE_MINUTES = 30
 SESSION_ABSOLUTE_HOURS = 24
+SESSION_REFRESH_INTERVAL_MINUTES = 5
 MAX_RECIPE_INGREDIENTS = 25
 MAX_RECIPE_INGREDIENT_LENGTH = 120
 RECIPE_RESULT_LIMIT = 10
@@ -491,8 +492,12 @@ def create_app(config=None):
     def refresh_session(response):
         session = getattr(g, "active_session", None)
         if response.status_code < 400 and session is not None and session.revoked_at is None:
-            session.last_seen_at = now_utc()
-            db.session.commit()
+            now = now_utc()
+            if now - ensure_utc(session.last_seen_at) >= timedelta(
+                minutes=SESSION_REFRESH_INTERVAL_MINUTES
+            ):
+                session.last_seen_at = now
+                db.session.commit()
         return response
 
     @app.get("/health")

@@ -134,9 +134,10 @@ pytest
 
 The authenticated `GET /items` endpoint has a recorded k6 benchmark against the
 Docker Compose stack seeded with one user and 1,000 active inventory items. The
-latest local run completed 1,147 iterations with 0 failed HTTP requests at
-32.51 requests per second and p95 latency of 3.78 seconds under 50 virtual
-users for 30 seconds.
+latest local run completed 3,842 iterations with 0 failed HTTP requests at
+125.83 requests per second and p95 latency of 509.67 ms under 50 virtual users
+for 30 seconds. This improved p95 latency by 86.5% after throttling session
+refresh writes on read-heavy authenticated requests.
 
 Detailed environment notes and procedure are recorded in
 `benchmarks/results.md`.
@@ -206,7 +207,6 @@ Core API areas:
 <img width="880" height="442" alt="image" src="https://github.com/user-attachments/assets/5212ce42-b4d3-4b7c-956d-d0c0855551d8" />
 <img width="903" height="577" alt="image" src="https://github.com/user-attachments/assets/ecb42512-917c-4321-aff1-c307633f26e4" />
 <img width="419" height="757" alt="image" src="https://github.com/user-attachments/assets/d9048b85-2816-48c4-8029-d932be988309" />
-
 
 
 
