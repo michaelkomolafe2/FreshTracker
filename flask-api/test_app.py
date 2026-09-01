@@ -1,4 +1,9 @@
-from datetime import date, timedelta
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+from io import StringIO
+import json
+import logging
+import uuid
 
 import pytest
 import requests
@@ -6,6 +11,7 @@ from sqlalchemy.exc import StatementError
 
 from app import (
     InventoryItem,
+    FreshTrackerJsonFormatter,
     Session,
     User,
     WasteLog,
@@ -18,6 +24,18 @@ from app import (
     recipe_ingredients_cache_key,
     send_expiry_alerts,
 )
+
+
+@contextmanager
+def capture_app_json_logs(app):
+    stream = StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(FreshTrackerJsonFormatter())
+    app.logger.addHandler(handler)
+    try:
+        yield stream
+    finally:
+        app.logger.removeHandler(handler)
 
 
 def expected_expiry_fields(expiry_date):
@@ -96,6 +114,65 @@ def test_health_returns_ok_status(client):
         "default-src 'none'; base-uri 'none'; form-action 'none'; "
         "frame-ancestors 'none';"
     )
+
+
+def test_request_log_is_structured_and_response_has_request_id(app, client):
+    with capture_app_json_logs(app) as log_stream:
+        response = client.get("/health")
+    request_id = response.headers["X-Request-ID"]
+    parsed_request_id = uuid.UUID(request_id)
+    assert parsed_request_id.version == 4
+    assert str(parsed_request_id) == request_id
+
+    log_entries = [
+        json.loads(line)
+        for line in log_stream.getvalue().splitlines()
+        if line.strip()
+    ]
+    request_log = next(
+        entry
+        for entry in reversed(log_entries)
+        if entry.get("event") == "request_completed"
+    )
+
+    assert datetime.fromisoformat(request_log["timestamp"]).tzinfo is not None
+    assert request_log["level"] == "info"
+    assert request_log["method"] == "GET"
+    assert request_log["path"] == "/health"
+    assert request_log["status_code"] == 200
+    assert request_log["duration_ms"] >= 0
+    assert request_log["request_id"] == request_id
+
+
+def test_unhandled_exception_log_contains_full_stack_trace(app):
+    @app.get("/_test/unhandled-error")
+    def raise_unhandled_error():
+        raise RuntimeError("forced logging failure")
+
+    app.config["TESTING"] = False
+    with capture_app_json_logs(app) as log_stream:
+        response = app.test_client().get("/_test/unhandled-error")
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "internal server error"}
+    assert response.headers["X-Request-ID"]
+
+    log_entries = [
+        json.loads(line)
+        for line in log_stream.getvalue().splitlines()
+        if line.strip()
+    ]
+    exception_log = next(
+        entry
+        for entry in log_entries
+        if entry.get("event") == "unhandled_exception"
+    )
+
+    assert exception_log["level"] == "error"
+    assert exception_log["status_code"] == 500
+    assert exception_log["request_id"] == response.headers["X-Request-ID"]
+    assert "Traceback" in exception_log["exc_info"]
+    assert "RuntimeError: forced logging failure" in exception_log["exc_info"]
 
 
 def test_recipe_suggestions_require_authentication(client):

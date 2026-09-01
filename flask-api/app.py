@@ -4,7 +4,9 @@ import hmac
 import json
 import logging
 import os
+import time
 import unicodedata
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
@@ -22,6 +24,7 @@ from flask import Flask, current_app, g, jsonify, request
 from flask_mail import Mail, Message
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+from pythonjsonlogger.json import JsonFormatter
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.exceptions import HTTPException
@@ -67,6 +70,30 @@ ALLOWED_ORIGINS = {
     ).split(",")
     if origin.strip()
 }
+
+
+class FreshTrackerJsonFormatter(JsonFormatter):
+    def add_fields(self, log_record, record, message_dict):
+        super().add_fields(log_record, record, message_dict)
+        log_record["timestamp"] = datetime.now(timezone.utc).isoformat()
+        log_record["level"] = record.levelname.lower()
+
+
+def configure_json_logging(app):
+    handler = logging.StreamHandler()
+    handler.setFormatter(FreshTrackerJsonFormatter())
+
+    app.logger.handlers.clear()
+    app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.propagate = False
+
+
+def request_duration_ms():
+    started_at = getattr(g, "request_started_at", None)
+    if started_at is None:
+        return 0.0
+    return round((time.perf_counter() - started_at) * 1000, 3)
 
 
 class RecipeProviderError(Exception):
@@ -355,6 +382,7 @@ def create_app(config=None):
     validate_mail_config(app.config)
     validate_expiry_alert_config(app.config)
     validate_spoonacular_config(app.config)
+    configure_json_logging(app)
 
     db.init_app(app)
     migrate.init_app(app, db)
@@ -363,6 +391,37 @@ def create_app(config=None):
     app.cli.add_command(run_expiry_alert_scheduler)
     app.cli.add_command(send_expiry_alerts_once)
 
+    @app.before_request
+    def start_request_observability():
+        g.request_id = str(uuid.uuid4())
+        g.request_started_at = time.perf_counter()
+
+    @app.after_request
+    def log_request(response):
+        request_id = g.request_id
+        response.headers["X-Request-ID"] = request_id
+        status_code = response.status_code
+        if status_code >= 500:
+            level = logging.ERROR
+        elif status_code >= 400:
+            level = logging.WARNING
+        else:
+            level = logging.INFO
+
+        current_app.logger.log(
+            level,
+            "request_completed",
+            extra={
+                "event": "request_completed",
+                "method": request.method,
+                "path": request.path,
+                "status_code": status_code,
+                "duration_ms": request_duration_ms(),
+                "request_id": request_id,
+            },
+        )
+        return response
+
     @app.errorhandler(HTTPException)
     def json_http_error(error):
         return jsonify({"error": error.description}), error.code
@@ -370,9 +429,20 @@ def create_app(config=None):
     @app.errorhandler(Exception)
     def json_unexpected_error(error):
         db.session.rollback()
+        current_app.logger.exception(
+            "unhandled_exception",
+            extra={
+                "event": "unhandled_exception",
+                "method": request.method,
+                "path": request.path,
+                "status_code": 500,
+                "duration_ms": request_duration_ms(),
+                "request_id": getattr(g, "request_id", None),
+                "exception_type": type(error).__name__,
+            },
+        )
         if current_app.testing:
             raise error
-        current_app.logger.exception("Unhandled API error")
         return jsonify({"error": "internal server error"}), 500
 
     @app.after_request

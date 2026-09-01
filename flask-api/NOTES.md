@@ -50,6 +50,18 @@ The inventory list removes an item optimistically when either action is
 selected. If the request fails, the original item is merged back into the list
 in expiry order and the API error is shown.
 
+## Structured request logging
+
+The Flask application logger has a single `python-json-logger` handler and does
+not propagate to Flask's default text handler. Each request receives a new UUID
+v4 correlation ID; the same value is returned as `X-Request-ID` and included in
+the completion event with a monotonic-clock duration. Request bodies, cookies,
+and authorization data are deliberately excluded from logs.
+
+Unhandled exceptions generate a separate JSON error event with `exc_info`, so
+the complete traceback remains machine-parseable. The normal completion event
+is still emitted for the resulting HTTP 500 response.
+
 # Recipe suggestions
 
 `GET /recipe-suggestions` derives ingredients from the authenticated user's

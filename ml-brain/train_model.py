@@ -1,11 +1,12 @@
 """Train and persist a grocery category text classifier."""
 
+import json
 from pathlib import Path
 
 import joblib
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
@@ -55,26 +56,48 @@ def train_and_evaluate(data):
     pipeline = build_model_pipeline()
     pipeline.fit(X_train, y_train)
     predictions = pipeline.predict(X_test)
-    accuracy = accuracy_score(y_test, predictions)
+    metrics = {
+        "dataset_row_count": len(data),
+        "train_test_split_ratio": {
+            "train": 1 - TEST_SIZE,
+            "test": TEST_SIZE,
+        },
+        "overall_accuracy": float(accuracy_score(y_test, predictions)),
+        "classification_report": classification_report(
+            y_test,
+            predictions,
+            output_dict=True,
+            zero_division=0,
+        ),
+    }
 
-    return pipeline, accuracy
+    return pipeline, metrics
 
 
 def save_model(pipeline, output_path):
     joblib.dump(pipeline, output_path)
 
 
+def save_metrics(metrics, output_path):
+    with output_path.open("w", encoding="utf-8") as metrics_file:
+        json.dump(metrics, metrics_file, indent=2, sort_keys=True)
+        metrics_file.write("\n")
+
+
 def main():
     script_dir = Path(__file__).resolve().parent
     csv_path = script_dir / "grocery_data.csv"
     model_path = script_dir / "model.pkl"
+    metrics_path = script_dir / "metrics.json"
 
     data = load_grocery_data(csv_path)
-    pipeline, accuracy = train_and_evaluate(data)
+    pipeline, metrics = train_and_evaluate(data)
     save_model(pipeline, model_path)
+    save_metrics(metrics, metrics_path)
 
-    print(f"Accuracy: {accuracy:.2%}")
+    print(f"Accuracy: {metrics['overall_accuracy']:.2%}")
     print(f"Saved model to {model_path}")
+    print(f"Saved metrics to {metrics_path}")
 
 
 if __name__ == "__main__":

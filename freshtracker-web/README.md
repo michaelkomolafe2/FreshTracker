@@ -1,16 +1,15 @@
-# React + Vite
+# FreshTracker Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React/Vite frontend for FreshTracker. The app provides authenticated inventory
+management, expiry-aware filtering, waste outcome analytics, and recipe
+suggestions from the Flask API.
 
-Currently, two official plugins are available:
+## Scripts
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- `npm run dev` starts the local Vite development server.
+- `npm run lint` runs Oxlint.
+- `npm run test` runs Vitest.
+- `npm run build` creates the production bundle served by Nginx in Docker.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+The frontend expects the API to be available through the `/api` proxy in local
+development or the Nginx configuration in the container image.

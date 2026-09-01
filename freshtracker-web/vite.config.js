@@ -8,6 +8,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/setupTests.ts',
+    clearMocks: true,
+    restoreMocks: true,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -20,8 +20,8 @@ import {
 import { ItemForm } from "@/components/ItemForm"
 import { ItemList } from "@/components/ItemList"
 import { RecipeSuggestions } from "@/components/RecipeSuggestions"
+import { requestJSON } from "@/lib/api"
 
-const API_BASE = "/api"
 const ALL_CATEGORIES = "all"
 const UNCATEGORIZED = "uncategorized"
 const WasteRatioChart = lazy(() =>
@@ -33,18 +33,6 @@ const WasteRatioChart = lazy(() =>
 const initialAuthValues = {
   email: "",
   password: "",
-}
-
-function readCookie(name) {
-  const match = document.cookie
-    .split("; ")
-    .find((cookie) => cookie.startsWith(`${encodeURIComponent(name)}=`))
-
-  if (!match) {
-    return ""
-  }
-
-  return decodeURIComponent(match.split("=").slice(1).join("="))
 }
 
 function mergeUpdatedItems(currentItems, changedItems) {
@@ -102,32 +90,6 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState(ALL_CATEGORIES)
   const [expirySort, setExpirySort] = useState("soonest")
   const [itemQuery, setItemQuery] = useState("")
-
-  async function requestJSON(path, options = {}) {
-    const method = (options.method ?? "GET").toUpperCase()
-    const response = await fetch(`${API_BASE}${path}`, {
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        ...(method !== "GET" && method !== "HEAD"
-          ? {
-              "X-CSRF-Token": readCookie("freshtracker_csrf"),
-            }
-          : {}),
-        ...(options.headers ?? {}),
-      },
-      ...options,
-    })
-
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      const error = new Error(payload.error ?? "Something went wrong.")
-      error.status = response.status
-      throw error
-    }
-
-    return payload
-  }
 
   async function fetchSession() {
     const payload = await requestJSON("/auth/me", { method: "GET", headers: {} })
@@ -462,6 +424,8 @@ function App() {
             <div className="mb-4 grid grid-cols-2 rounded-full bg-slate-100 p-1">
               <button
                 type="button"
+                aria-label="Show sign in form"
+                aria-pressed={authMode === "login"}
                 onClick={() => setAuthMode("login")}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                   authMode === "login"
@@ -473,6 +437,8 @@ function App() {
               </button>
               <button
                 type="button"
+                aria-label="Show registration form"
+                aria-pressed={authMode === "register"}
                 onClick={() => setAuthMode("register")}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                   authMode === "register"
@@ -648,7 +614,11 @@ function App() {
             </header>
 
             {error ? (
-              <div className="flex items-start gap-3 rounded-md border border-destructive/35 bg-harvest-paper px-4 py-4 text-sm text-destructive">
+              <div
+                className="flex items-start gap-3 rounded-md border border-destructive/35 bg-harvest-paper px-4 py-4 text-sm text-destructive"
+                role="alert"
+                aria-live="polite"
+              >
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   <p className="font-semibold">Something needs attention.</p>
